@@ -36,14 +36,14 @@ final class Prefs: ObservableObject {
     }
 
     /// The Settings field wins; falls back to the process environment, then to
-    /// the development .env one directory above the package.
+    /// ~/.config/verbatim/.env (a line of the form OPENAI_API_KEY=sk-...).
     func resolvedAPIKey() -> String? {
         if !apiKey.isEmpty { return apiKey }
         if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
             return env
         }
         let envFile = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("personal/dictation/.env")
+            .appendingPathComponent(".config/verbatim/.env")
         if let text = try? String(contentsOf: envFile, encoding: .utf8) {
             for line in text.split(separator: "\n") where line.hasPrefix("OPENAI_API_KEY=") {
                 let value = String(line.dropFirst("OPENAI_API_KEY=".count))
