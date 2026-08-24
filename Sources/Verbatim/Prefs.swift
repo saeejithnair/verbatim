@@ -15,6 +15,10 @@ final class Prefs: ObservableObject {
     Do not clean up, rephrase, or omit anything.
     """
 
+    /// Starter keyword set for the app's core audience: people dictating to
+    /// AI coding agents.
+    static let defaultKeywords = "Claude Code, Codex, PR, Supabase"
+
     private let defaults = UserDefaults.standard
 
     @Published var apiKey: String { didSet { defaults.set(apiKey, forKey: "apiKey") } }
@@ -30,7 +34,7 @@ final class Prefs: ObservableObject {
         hotkey = ModifierKey(rawValue: defaults.string(forKey: "hotkey") ?? "") ?? .rightOption
         delay = TranscriptionDelay(rawValue: defaults.string(forKey: "delay") ?? "") ?? .medium
         prompt = defaults.string(forKey: "prompt") ?? Self.defaultPrompt
-        keywords = defaults.string(forKey: "keywords") ?? ""
+        keywords = defaults.string(forKey: "keywords") ?? Self.defaultKeywords
         playSounds = defaults.object(forKey: "playSounds") as? Bool ?? true
         trailingSpace = defaults.object(forKey: "trailingSpace") as? Bool ?? true
     }
