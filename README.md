@@ -8,7 +8,9 @@ subscription: bring your own API key (~$0.017 per audio minute).
 Hold a modifier key, talk, release. The audio streams to the realtime API
 *while* you speak, so the final transcript arrives almost immediately after
 you let go and is pasted into whatever app has focus. Nothing is shown while
-you talk; nothing is stored.
+you talk. Each dictation is kept in a local history (menu bar → History…)
+with its duration and estimated API cost; audio is never stored, and the
+history is yours to clear.
 
 ## Install
 

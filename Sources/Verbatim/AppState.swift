@@ -69,6 +69,7 @@ final class AppState: ObservableObject {
             do {
                 let text = try await transcriber.finish()
                 self.lastTranscript = text
+                History.shared.add(text: text, seconds: transcriber.streamedSeconds)
                 if !text.isEmpty {
                     Paster.insertText(text)
                     if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }

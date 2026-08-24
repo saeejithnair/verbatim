@@ -27,7 +27,7 @@ final class Prefs: ObservableObject {
     private init() {
         apiKey = defaults.string(forKey: "apiKey") ?? ""
         hotkey = ModifierKey(rawValue: defaults.string(forKey: "hotkey") ?? "") ?? .rightOption
-        delay = TranscriptionDelay(rawValue: defaults.string(forKey: "delay") ?? "") ?? .low
+        delay = TranscriptionDelay(rawValue: defaults.string(forKey: "delay") ?? "") ?? .medium
         prompt = defaults.string(forKey: "prompt") ?? Self.defaultPrompt
         keywords = defaults.string(forKey: "keywords") ?? ""
         playSounds = defaults.object(forKey: "playSounds") as? Bool ?? true

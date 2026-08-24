@@ -16,6 +16,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private var socketClosed = false
     private var pendingAudio: [Data] = []
     private var committed = false
+    private var appendedBytes = 0
 
     private var itemOrder: [String] = []
     private var deltas: [String: String] = [:]
@@ -41,12 +42,19 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     func append(_ audio: Data) {
         queue.async {
             if self.socketOpen {
+                self.appendedBytes += audio.count
                 self.sendJSON(["type": "input_audio_buffer.append",
                                "audio": audio.base64EncodedString()])
             } else if !self.socketClosed {
+                self.appendedBytes += audio.count
                 self.pendingAudio.append(audio)
             }
         }
+    }
+
+    /// Duration of audio streamed this turn, for cost accounting.
+    var streamedSeconds: Double {
+        queue.sync { Double(appendedBytes) / (24000.0 * 2.0) }
     }
 
     func finish(timeout: TimeInterval = 12) async throws -> String {

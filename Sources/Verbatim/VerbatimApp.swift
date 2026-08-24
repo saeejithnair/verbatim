@@ -20,6 +20,11 @@ struct VerbatimApp: App {
         Settings {
             SettingsView()
         }
+
+        Window("Verbatim History", id: "history") {
+            HistoryView()
+        }
+        .defaultSize(width: 480, height: 420)
     }
 }
 
@@ -46,9 +51,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct MenuContent: View {
     @ObservedObject var state: AppState
+    @ObservedObject private var history = History.shared
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(state.statusLine)
+        Text(String(format: "Total: %.1f min · ~$%.2f", history.totalSeconds / 60, history.totalCost))
         if !state.lastTranscript.isEmpty {
             Button("Copy last transcript") {
                 let pasteboard = NSPasteboard.general
@@ -57,6 +65,11 @@ struct MenuContent: View {
             }
         }
         Divider()
+        Button("History…") {
+            openWindow(id: "history")
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut("h")
         SettingsLink { Text("Settings…") }
             .keyboardShortcut(",")
         Divider()
