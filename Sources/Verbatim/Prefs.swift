@@ -23,6 +23,7 @@ final class Prefs: ObservableObject {
     @Published var prompt: String { didSet { defaults.set(prompt, forKey: "prompt") } }
     @Published var keywords: String { didSet { defaults.set(keywords, forKey: "keywords") } }
     @Published var playSounds: Bool { didSet { defaults.set(playSounds, forKey: "playSounds") } }
+    @Published var trailingSpace: Bool { didSet { defaults.set(trailingSpace, forKey: "trailingSpace") } }
 
     private init() {
         apiKey = defaults.string(forKey: "apiKey") ?? ""
@@ -31,6 +32,7 @@ final class Prefs: ObservableObject {
         prompt = defaults.string(forKey: "prompt") ?? Self.defaultPrompt
         keywords = defaults.string(forKey: "keywords") ?? ""
         playSounds = defaults.object(forKey: "playSounds") as? Bool ?? true
+        trailingSpace = defaults.object(forKey: "trailingSpace") as? Bool ?? true
     }
 
     /// The Settings field wins; falls back to the process environment, then to

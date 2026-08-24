@@ -99,9 +99,12 @@ struct MainView: View {
                 Divider()
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Image(systemName: state.menuIcon)
                     .font(.title3)
+                    .foregroundStyle(state.iconColor)
+                    .frame(width: 24)
+                    .contentTransition(.symbolEffect(.replace))
                 Text(state.statusLine)
                 Spacer()
                 SettingsLink { Text("Settings…") }

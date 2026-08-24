@@ -5,6 +5,8 @@ struct HistoryEntry: Codable, Identifiable {
     let date: Date
     let seconds: Double
     let text: String
+    /// Key release → transcript ready. The felt latency.
+    let finalizeSeconds: Double?
 
     var cost: Double { seconds / 60 * History.pricePerMinute }
 }
@@ -35,8 +37,9 @@ final class History: ObservableObject {
         }
     }
 
-    func add(text: String, seconds: Double) {
-        entries.append(HistoryEntry(id: UUID(), date: Date(), seconds: seconds, text: text))
+    func add(text: String, seconds: Double, finalizeSeconds: Double? = nil) {
+        entries.append(HistoryEntry(id: UUID(), date: Date(), seconds: seconds,
+                                    text: text, finalizeSeconds: finalizeSeconds))
         save()
     }
 

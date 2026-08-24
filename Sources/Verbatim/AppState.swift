@@ -68,11 +68,13 @@ final class AppState: ObservableObject {
         phase = .finalizing
         Task {
             do {
+                let releasedAt = Date()
                 let text = try await transcriber.finish()
                 self.lastTranscript = text
-                History.shared.add(text: text, seconds: transcriber.streamedSeconds)
+                History.shared.add(text: text, seconds: transcriber.streamedSeconds,
+                                   finalizeSeconds: Date().timeIntervalSince(releasedAt))
                 if !text.isEmpty {
-                    Paster.insertText(text)
+                    Paster.insertText(Prefs.shared.trailingSpace ? text + " " : text)
                     if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }
                 }
                 self.phase = .idle
@@ -88,6 +90,15 @@ final class AppState: ObservableObject {
     private func fail(_ message: String) {
         phase = .error(message)
         if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
+    }
+
+    var iconColor: Color {
+        switch phase {
+        case .idle: .secondary
+        case .recording: .red
+        case .finalizing: .blue
+        case .error: .yellow
+        }
     }
 
     var menuIcon: String {

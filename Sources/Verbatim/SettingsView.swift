@@ -27,6 +27,9 @@ struct SettingsView: View {
                     }
                 }
                 caption("Lower finalizes text sooner; higher gives the model more context per word.")
+
+                Toggle("Insert space after dictation", isOn: $prefs.trailingSpace)
+                caption("So back-to-back dictations don't run together.")
             }
 
             Section("Keywords") {
