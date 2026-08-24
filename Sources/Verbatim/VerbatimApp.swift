@@ -29,14 +29,11 @@ struct VerbatimApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var trustTimer: Timer?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             if !granted { NSLog("Microphone access denied") }
-        }
-
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        if !AXIsProcessTrustedWithOptions(options as CFDictionary) {
-            NSLog("Waiting for Accessibility permission")
         }
 
         HotkeyMonitor.shared.onKeyDown = {
@@ -45,7 +42,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotkeyMonitor.shared.onKeyUp = {
             Task { @MainActor in AppShared.state.keyUp() }
         }
-        HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
+
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        AXIsProcessTrustedWithOptions(options as CFDictionary)
+        updateTrust()
+    }
+
+    /// Accessibility can be granted while the app runs; poll until it is,
+    /// then (re)create the event tap so no relaunch is needed.
+    private func updateTrust() {
+        let trusted = AXIsProcessTrusted()
+        Task { @MainActor in AppShared.state.accessibilityGranted = trusted }
+        if trusted {
+            trustTimer?.invalidate()
+            trustTimer = nil
+            HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
+        } else if trustTimer == nil {
+            trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                if AXIsProcessTrusted() { self?.updateTrust() }
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -66,6 +82,23 @@ struct MainView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if !state.accessibilityGranted {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Text("Verbatim needs Accessibility access to see the hotkey and paste.")
+                        .font(.callout)
+                    Spacer()
+                    Button("Open System Settings") {
+                        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .padding(10)
+                .background(.yellow.opacity(0.12))
+                Divider()
+            }
+
             HStack {
                 Image(systemName: state.menuIcon)
                     .font(.title3)

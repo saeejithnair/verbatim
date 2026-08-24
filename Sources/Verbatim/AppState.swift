@@ -10,6 +10,7 @@ final class AppState: ObservableObject {
 
     @Published var phase: Phase = .idle
     @Published var lastTranscript = ""
+    @Published var accessibilityGranted = true
 
     private var streamer: AudioStreamer?
     private var transcriber: RealtimeTranscriber?
