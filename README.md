@@ -19,7 +19,9 @@ history is yours to clear.
 open dist/Verbatim.app
 ```
 
-Apple Silicon, macOS 14+. On first run:
+Apple Silicon, macOS 14+. Verbatim is a regular Dock app — its main window
+shows live status and the dictation history, and a mic icon in the menu bar
+mirrors state for quick access. On first run:
 
 1. Set your OpenAI API key in Settings (menu bar icon → Settings…).
 2. Grant Microphone access when prompted.

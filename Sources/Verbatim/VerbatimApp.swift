@@ -11,20 +11,20 @@ struct VerbatimApp: App {
     @StateObject private var state = AppShared.state
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuContent(state: state)
-        } label: {
-            Image(systemName: state.menuIcon)
+        Window("Verbatim", id: "main") {
+            MainView(state: state)
         }
+        .defaultSize(width: 520, height: 480)
 
         Settings {
             SettingsView()
         }
 
-        Window("Verbatim History", id: "history") {
-            HistoryView()
+        MenuBarExtra {
+            MenuContent(state: state)
+        } label: {
+            Image(systemName: state.menuIcon)
         }
-        .defaultSize(width: 480, height: 420)
     }
 }
 
@@ -47,6 +47,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
     }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Dock click with no open windows: bring the main window back.
+        if !flag {
+            for window in sender.windows where window.identifier?.rawValue == "main" {
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+        return true
+    }
+}
+
+/// The main window: live status on top, dictation history below.
+struct MainView: View {
+    @ObservedObject var state: AppState
+    @ObservedObject private var history = History.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: state.menuIcon)
+                    .font(.title3)
+                Text(state.statusLine)
+                Spacer()
+                SettingsLink { Text("Settings…") }
+                    .keyboardShortcut(",")
+            }
+            .padding()
+
+            Divider()
+
+            HistoryView()
+        }
+    }
 }
 
 struct MenuContent: View {
@@ -65,8 +99,8 @@ struct MenuContent: View {
             }
         }
         Divider()
-        Button("History…") {
-            openWindow(id: "history")
+        Button("Open Verbatim") {
+            openWindow(id: "main")
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
         .keyboardShortcut("h")
