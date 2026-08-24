@@ -18,7 +18,9 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private var socketClosed = false
     private var pendingAudio: [Data] = []
     private var committed = false
+    private var commitSent = false
     private var appendedBytes = 0
+    private var sessionPayload: [String: Any] = [:]
 
     private var itemOrder: [String] = []
     private var deltas: [String: String] = [:]
@@ -39,7 +41,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         self.apiKey = apiKey
     }
 
+    /// Call on the main thread: the session payload is snapshotted from
+    /// Prefs here so the socket queue never races the Settings UI.
     func connect() {
+        sessionPayload = Self.buildSessionPayload()
         var request = URLRequest(url: URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         let task = Self.session.webSocketTask(with: request)
@@ -51,6 +56,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
 
     func append(_ audio: Data) {
         queue.async {
+            // A chunk still in flight when the turn commits must not open a
+            // fresh server item — that item would never complete and the
+            // finish would ride the full timeout.
+            guard !self.committed else { return }
             if self.socketOpen {
                 self.appendedBytes += audio.count
                 self.sendJSON(["type": "input_audio_buffer.append",
@@ -60,6 +69,21 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
                 self.pendingAudio.append(audio)
             }
         }
+    }
+
+    /// Put the commit on the wire as early as possible — before the caller
+    /// pays for audio-engine teardown. finish() then only awaits the result.
+    func commitAudio() {
+        queue.async {
+            self.committed = true
+            self.sendCommitIfNeeded()
+        }
+    }
+
+    private func sendCommitIfNeeded() {
+        guard !commitSent, socketOpen else { return }
+        commitSent = true
+        sendJSON(["type": "input_audio_buffer.commit"])
     }
 
     /// Duration of audio streamed this turn, for cost accounting.
@@ -82,9 +106,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
                 }
                 self.finishContinuation = cont
                 self.committed = true
-                if self.socketOpen {
-                    self.sendJSON(["type": "input_audio_buffer.commit"])
-                }
+                self.sendCommitIfNeeded()
                 self.queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
                     self?.timedOut()
                 }
@@ -113,7 +135,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             }
             self.pendingAudio.removeAll()
             if self.committed {
-                self.sendJSON(["type": "input_audio_buffer.commit"])
+                self.sendCommitIfNeeded()
             }
         }
     }
@@ -160,6 +182,12 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     }
 
     private func sendSessionUpdate() {
+        sendJSON(sessionPayload)
+    }
+
+    /// Built on the main thread at connect() time — Prefs is main-actor UI
+    /// state and must not be read from the socket queue.
+    private static func buildSessionPayload() -> [String: Any] {
         var transcription: [String: Any] = [
             "model": "gpt-live-transcribe",
             "delay": Prefs.shared.delay.rawValue,
@@ -174,7 +202,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         let languages = Prefs.shared.languageList
         if !languages.isEmpty { transcription["languages"] = languages }
 
-        sendJSON([
+        return [
             "type": "session.update",
             "session": [
                 "type": "transcription",
@@ -187,7 +215,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
                     ],
                 ],
             ],
-        ])
+        ]
     }
 
     private func handleEvent(_ text: String) {

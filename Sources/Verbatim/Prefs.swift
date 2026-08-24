@@ -45,8 +45,14 @@ final class Prefs: ObservableObject {
 
     /// The Settings field wins; falls back to the process environment, then to
     /// ~/.config/verbatim/.env (a line of the form OPENAI_API_KEY=sk-...).
+    /// The fallback is resolved once per launch — it otherwise puts a
+    /// synchronous file read on every keyDown.
     func resolvedAPIKey() -> String? {
         if !apiKey.isEmpty { return apiKey }
+        return fallbackKey
+    }
+
+    private lazy var fallbackKey: String? = {
         if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
             return env
         }
@@ -60,7 +66,7 @@ final class Prefs: ObservableObject {
             }
         }
         return nil
-    }
+    }()
 
     var keywordList: [String] {
         keywords.split(whereSeparator: { $0 == "," || $0.isNewline })

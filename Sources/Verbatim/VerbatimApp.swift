@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var trustTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Sfx.warm()
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             if !granted { NSLog("Microphone access denied") }
         }

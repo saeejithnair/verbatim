@@ -7,22 +7,22 @@ import SwiftUI
 final class DictationTurn {
     let transcriber: RealtimeTranscriber
     let streamer = AudioStreamer()
-    var captured: [Data] = []
+    var captured = Data()
     var peak: Int16 = 0
     /// Socket died while recording; skip realtime finish, go straight to batch.
     var degraded = false
+    /// First audible chunk arrived — the mic is genuinely live (Bluetooth
+    /// mics take a second or two to wake).
+    var heardAudio = false
     let startedAt = Date()
 
     init(apiKey: String) {
         transcriber = RealtimeTranscriber(apiKey: apiKey)
+        captured.reserveCapacity(48_000 * 60)
     }
 
     var capturedSeconds: Double {
-        Double(captured.reduce(0) { $0 + $1.count }) / 48_000.0
-    }
-
-    var capturedPCM: Data {
-        captured.reduce(into: Data()) { $0.append($1) }
+        Double(captured.count) / 48_000.0
     }
 }
 
@@ -121,11 +121,11 @@ final class AppState: ObservableObject {
 
     func repasteLast() {
         guard !lastTranscript.isEmpty else {
-            if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
+            if Prefs.shared.playSounds { Sfx.nevermind?.play() }
             return
         }
         if Paster.insertText(Prefs.shared.trailingSpace ? lastTranscript + " " : lastTranscript) {
-            if Prefs.shared.playSounds && Prefs.shared.endSound { NSSound(named: "Pop")?.play() }
+            if Prefs.shared.playSounds && Prefs.shared.endSound { Sfx.landed?.play() }
         } else {
             fail("Secure input is active — the transcript is on your clipboard, press ⌘V")
         }
@@ -144,7 +144,7 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 guard let turn, turn === self?.currentTurn, !turn.degraded else { return }
                 turn.degraded = true
-                if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
+                if Prefs.shared.playSounds { Sfx.trouble?.play() }
             }
         }
         turn.streamer.onChunk = { [weak turn] data, peak in
@@ -153,9 +153,19 @@ final class AppState: ObservableObject {
                 turn.captured.append(data)
                 turn.peak = max(turn.peak, peak)
                 turn.transcriber.append(data)
+                // The start cue fires when sound is actually arriving, not at
+                // keypress — on Bluetooth mics those moments are seconds
+                // apart, and speech before the wake-up never reaches the Mac.
+                if !turn.heardAudio && peak > 300 {
+                    turn.heardAudio = true
+                    if Prefs.shared.playSounds { Sfx.begin?.play() }
+                }
             }
         }
 
+        // The connect is ~300 ms of network; the engine start blocks the main
+        // thread. Kick the network off first so they overlap.
+        turn.transcriber.connect()
         do {
             try turn.streamer.start()
         } catch {
@@ -163,10 +173,8 @@ final class AppState: ObservableObject {
             fail(error.localizedDescription)
             return
         }
-        turn.transcriber.connect()
         currentTurn = turn
         phase = .recording
-        if Prefs.shared.playSounds { NSSound(named: "Tink")?.play() }
 
         holdWatchdog?.invalidate()
         holdWatchdog = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -190,7 +198,7 @@ final class AppState: ObservableObject {
         holdWatchdog = nil
         turn.streamer.stop()
         turn.transcriber.cancel()
-        if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
+        if Prefs.shared.playSounds { Sfx.nevermind?.play() }
         settlePhase()
     }
 
@@ -206,6 +214,8 @@ final class AppState: ObservableObject {
             // Capture the human tail — the syllable still leaving the mouth
             // as the finger lifts — before closing the stream.
             try? await Task.sleep(for: .milliseconds(120))
+            // Commit goes on the wire before the blocking engine teardown.
+            turn.transcriber.commitAudio()
             turn.streamer.stop()
             await finalize(turn, releasedAt: releasedAt)
         }
@@ -231,7 +241,7 @@ final class AppState: ObservableObject {
 
         if text == nil {
             // Realtime failed: the local buffer is the source of truth.
-            let pcm = turn.capturedPCM
+            let pcm = turn.captured
             if pcm.isEmpty {
                 failureMessage = failureMessage ?? "no audio captured"
             } else if let apiKey = Prefs.shared.resolvedAPIKey() {
@@ -250,19 +260,18 @@ final class AppState: ObservableObject {
         finalizingCount -= 1
 
         if let text {
-            lastTranscript = text
-            History.shared.add(text: text, seconds: turn.capturedSeconds,
-                               finalizeSeconds: Date().timeIntervalSince(releasedAt),
-                               truncated: turn.transcriber.timedOutWithPartial)
             if text.isEmpty {
+                recordEntry(text, turn: turn, releasedAt: releasedAt)
                 if turn.peak < Self.silenceFloor {
                     fail("No audio reached the app — check your input device")
                 } else {
-                    if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
+                    if Prefs.shared.playSounds { Sfx.nevermind?.play() }
                     settlePhase()
                 }
             } else {
+                // Paste first; bookkeeping and @Published churn after.
                 deliver(text)
+                recordEntry(text, turn: turn, releasedAt: releasedAt)
                 settlePhase()
             }
         } else if let failureMessage {
@@ -270,6 +279,13 @@ final class AppState: ObservableObject {
         } else {
             settlePhase()
         }
+    }
+
+    private func recordEntry(_ text: String, turn: DictationTurn, releasedAt: Date) {
+        lastTranscript = text
+        History.shared.add(text: text, seconds: turn.capturedSeconds,
+                           finalizeSeconds: Date().timeIntervalSince(releasedAt),
+                           truncated: turn.transcriber.timedOutWithPartial)
     }
 
     /// Recover WAVs parked by failed turns from previous runs: transcribe
@@ -307,7 +323,7 @@ final class AppState: ObservableObject {
             flushPendingPastes()
             if Paster.insertText(payload) {
                 if Prefs.shared.playSounds && Prefs.shared.endSound {
-                    NSSound(named: "Pop")?.play()
+                    Sfx.landed?.play()
                 }
             } else {
                 fail("Secure input is active — the transcript is on your clipboard, press ⌘V")
@@ -339,11 +355,11 @@ final class AppState: ObservableObject {
     private func fail(_ message: String) {
         if currentTurn != nil {
             // Mid-recording: don't hijack the icon; the sound is the signal.
-            if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
+            if Prefs.shared.playSounds { Sfx.trouble?.play() }
             return
         }
         phase = .error(message)
-        if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
+        if Prefs.shared.playSounds { Sfx.trouble?.play() }
     }
 
     // MARK: - Presentation

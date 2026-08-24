@@ -69,6 +69,7 @@ enum BatchTranscriber {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
+        body.reserveCapacity(wavData.count + 2048)
         func field(_ name: String, _ value: String) {
             body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
         }
@@ -94,6 +95,7 @@ enum BatchTranscriber {
         let sampleRate: UInt32 = 24_000
         let byteRate = sampleRate * 2
         var data = Data()
+        data.reserveCapacity(44 + pcm.count)
         func append32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
         func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
         data.append(Data("RIFF".utf8)); append32(UInt32(36 + pcm.count)); data.append(Data("WAVE".utf8))
