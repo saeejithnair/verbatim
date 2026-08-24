@@ -27,7 +27,9 @@ final class Prefs: ObservableObject {
     @Published var prompt: String { didSet { defaults.set(prompt, forKey: "prompt") } }
     @Published var keywords: String { didSet { defaults.set(keywords, forKey: "keywords") } }
     @Published var playSounds: Bool { didSet { defaults.set(playSounds, forKey: "playSounds") } }
+    @Published var endSound: Bool { didSet { defaults.set(endSound, forKey: "endSound") } }
     @Published var trailingSpace: Bool { didSet { defaults.set(trailingSpace, forKey: "trailingSpace") } }
+    @Published var languages: String { didSet { defaults.set(languages, forKey: "languages") } }
 
     private init() {
         apiKey = defaults.string(forKey: "apiKey") ?? ""
@@ -36,7 +38,9 @@ final class Prefs: ObservableObject {
         prompt = defaults.string(forKey: "prompt") ?? Self.defaultPrompt
         keywords = defaults.string(forKey: "keywords") ?? Self.defaultKeywords
         playSounds = defaults.object(forKey: "playSounds") as? Bool ?? true
+        endSound = defaults.object(forKey: "endSound") as? Bool ?? true
         trailingSpace = defaults.object(forKey: "trailingSpace") as? Bool ?? true
+        languages = defaults.string(forKey: "languages") ?? ""
     }
 
     /// The Settings field wins; falls back to the process environment, then to
@@ -59,8 +63,19 @@ final class Prefs: ObservableObject {
     }
 
     var keywordList: [String] {
-        keywords.split(separator: ",")
+        keywords.split(whereSeparator: { $0 == "," || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
+            // The API rejects keywords containing angle brackets or newlines;
+            // one bad entry would poison every session.
+            .map { $0.replacingOccurrences(of: "[<>\r\n]", with: "", options: .regularExpression) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// ISO 639-1 codes; empty = auto-detect. Locking languages stops the
+    /// model drifting into another script mid-sentence.
+    var languageList: [String] {
+        languages.split(whereSeparator: { $0 == "," || $0.isWhitespace })
+            .map { $0.lowercased() }
             .filter { !$0.isEmpty }
     }
 }

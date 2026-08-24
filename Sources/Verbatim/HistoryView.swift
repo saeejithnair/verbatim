@@ -67,6 +67,11 @@ struct HistoryCard: View {
                     }
                     Text("·")
                     Text(String(format: "~$%.3f", entry.cost))
+                    if entry.truncated == true {
+                        Text("partial")
+                            .foregroundStyle(.orange)
+                            .help("Finalize timed out; the transcript may be missing its tail")
+                    }
                 }
                 .font(.caption)
                 .monospacedDigit()

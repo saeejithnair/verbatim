@@ -31,6 +31,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     /// batch transcription.
     var onConnectionLost: (() -> Void)?
 
+    /// True when finish() timed out and returned delta-assembled text — the
+    /// transcript may be missing its tail and should be marked as partial.
+    private(set) var timedOutWithPartial = false
+
     init(apiKey: String) {
         self.apiKey = apiKey
     }
@@ -120,6 +124,19 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         queue.async { self.socketFailed("socket closed: \(detail)") }
     }
 
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
+        guard error != nil || status >= 400 else { return }
+        let detail: String
+        switch status {
+        case 401, 403: detail = "API key rejected — check it in Settings"
+        case 429: detail = "rate limited by OpenAI"
+        case 500...599: detail = "OpenAI outage (HTTP \(status))"
+        default: detail = error?.localizedDescription ?? "connection failed"
+        }
+        queue.async { self.socketFailed(detail) }
+    }
+
     private func receiveLoop(_ task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
             guard let self else { return }
@@ -151,6 +168,8 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         if !prompt.isEmpty { transcription["prompt"] = prompt }
         let keywords = Prefs.shared.keywordList
         if !keywords.isEmpty { transcription["keywords"] = keywords }
+        let languages = Prefs.shared.languageList
+        if !languages.isEmpty { transcription["languages"] = languages }
 
         sendJSON([
             "type": "session.update",
@@ -187,10 +206,14 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             maybeComplete()
 
         case "error":
-            let message = ((object["error"] as? [String: Any])?["message"] as? String) ?? text
+            let errorObject = object["error"] as? [String: Any]
+            let message = (errorObject?["message"] as? String) ?? text
+            let code = (errorObject?["code"] as? String) ?? ""
             // Committing a near-empty buffer (tap-and-release) errors; that is
-            // just an empty dictation, not a failure.
-            if committed && message.lowercased().contains("buffer") {
+            // just an empty dictation, not a failure. Match the code first —
+            // the message wording is not a contract.
+            if committed && (code == "input_audio_buffer_commit_empty"
+                             || message.lowercased().contains("buffer")) {
                 complete(.success(currentText()))
             } else if finishContinuation != nil {
                 complete(.failure(VerbatimError.transcription(message)))
@@ -226,7 +249,8 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         if text.isEmpty {
             complete(.failure(fatalError.map { VerbatimError.transcription($0) } ?? .timeout))
         } else {
-            // Better a delta-built transcript than nothing.
+            // Better a delta-built transcript than nothing — but flag it.
+            timedOutWithPartial = true
             complete(.success(text))
         }
     }

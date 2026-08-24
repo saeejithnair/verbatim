@@ -45,6 +45,10 @@ final class AppState: ObservableObject {
     private var pressStartedAt: Date?
     private var secondPress = false
     private var finalizingCount = 0
+    /// Screen lock or a tap timeout can eat the key-up event, wedging the app
+    /// in .recording with the mic hot. While a non-latched hold is active,
+    /// poll the real hardware modifier state and synthesize the release.
+    private var holdWatchdog: Timer?
     /// Pastes held back while a hotkey is physically down, so a synthesized
     /// Cmd+V never fires with a modifier held. Flushed when the mic is free.
     private var pendingPastes: [String] = []
@@ -120,8 +124,11 @@ final class AppState: ObservableObject {
             if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
             return
         }
-        Paster.insertText(Prefs.shared.trailingSpace ? lastTranscript + " " : lastTranscript)
-        if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }
+        if Paster.insertText(Prefs.shared.trailingSpace ? lastTranscript + " " : lastTranscript) {
+            if Prefs.shared.playSounds && Prefs.shared.endSound { NSSound(named: "Pop")?.play() }
+        } else {
+            fail("Secure input is active — the transcript is on your clipboard, press ⌘V")
+        }
     }
 
     // MARK: - Turn lifecycle
@@ -160,11 +167,27 @@ final class AppState: ObservableObject {
         currentTurn = turn
         phase = .recording
         if Prefs.shared.playSounds { NSSound(named: "Tink")?.play() }
+
+        holdWatchdog?.invalidate()
+        holdWatchdog = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.watchdogTick() }
+        }
+    }
+
+    private func watchdogTick() {
+        guard currentTurn != nil, !latched, provisionalCancel == nil, !secondPress else { return }
+        let flag = Prefs.shared.hotkey.cgEventFlag
+        guard flag != [] else { return }
+        if !CGEventSource.flagsState(.combinedSessionState).contains(flag) {
+            keyUp()
+        }
     }
 
     private func cancelCurrentTurn() {
         guard let turn = currentTurn else { return }
         currentTurn = nil
+        holdWatchdog?.invalidate()
+        holdWatchdog = nil
         turn.streamer.stop()
         turn.transcriber.cancel()
         if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
@@ -174,14 +197,21 @@ final class AppState: ObservableObject {
     private func commitCurrentTurn() {
         guard let turn = currentTurn else { return }
         currentTurn = nil
-        turn.streamer.stop()
+        holdWatchdog?.invalidate()
+        holdWatchdog = nil
         finalizingCount += 1
         settlePhase()
-        Task { await finalize(turn) }
+        let releasedAt = Date()
+        Task {
+            // Capture the human tail — the syllable still leaving the mouth
+            // as the finger lifts — before closing the stream.
+            try? await Task.sleep(for: .milliseconds(120))
+            turn.streamer.stop()
+            await finalize(turn, releasedAt: releasedAt)
+        }
     }
 
-    private func finalize(_ turn: DictationTurn) async {
-        let releasedAt = Date()
+    private func finalize(_ turn: DictationTurn, releasedAt: Date) async {
         var text: String?
         var failureMessage: String?
 
@@ -189,7 +219,9 @@ final class AppState: ObservableObject {
             turn.transcriber.cancel()
         } else {
             do {
-                text = try await turn.transcriber.finish()
+                // Long rambles need proportionally longer to flush.
+                let timeout = max(12, turn.capturedSeconds * 0.4)
+                text = try await turn.transcriber.finish(timeout: timeout)
             } catch is CancellationError {
                 // fall through to batch
             } catch {
@@ -220,7 +252,8 @@ final class AppState: ObservableObject {
         if let text {
             lastTranscript = text
             History.shared.add(text: text, seconds: turn.capturedSeconds,
-                               finalizeSeconds: Date().timeIntervalSince(releasedAt))
+                               finalizeSeconds: Date().timeIntervalSince(releasedAt),
+                               truncated: turn.transcriber.timedOutWithPartial)
             if text.isEmpty {
                 if turn.peak < Self.silenceFloor {
                     fail("No audio reached the app — check your input device")
@@ -269,16 +302,25 @@ final class AppState: ObservableObject {
             pendingPastes.append(payload)
         } else {
             flushPendingPastes()
-            Paster.insertText(payload)
-            if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }
+            if Paster.insertText(payload) {
+                if Prefs.shared.playSounds && Prefs.shared.endSound {
+                    NSSound(named: "Pop")?.play()
+                }
+            } else {
+                fail("Secure input is active — the transcript is on your clipboard, press ⌘V")
+            }
         }
     }
 
     private func flushPendingPastes() {
-        for payload in pendingPastes {
-            Paster.insertText(payload)
+        var blocked = false
+        for payload in pendingPastes where !Paster.insertText(payload) {
+            blocked = true
         }
         pendingPastes.removeAll()
+        if blocked {
+            fail("Secure input is active — a transcript is on your clipboard, press ⌘V")
+        }
     }
 
     private func settlePhase() {

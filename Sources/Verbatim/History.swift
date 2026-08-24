@@ -9,6 +9,9 @@ struct HistoryEntry: Codable, Identifiable {
     let finalizeSeconds: Double?
     /// Rate at capture time, so a future price change never rewrites the past.
     let pricePerMinute: Double?
+    /// Finalize timed out; this text was assembled from deltas and may be
+    /// missing its tail.
+    let truncated: Bool?
 
     var cost: Double { seconds / 60 * (pricePerMinute ?? History.pricePerMinute) }
 }
@@ -75,11 +78,13 @@ final class History: ObservableObject {
         }
     }
 
-    func add(text: String, seconds: Double, finalizeSeconds: Double? = nil) {
+    func add(text: String, seconds: Double, finalizeSeconds: Double? = nil,
+             truncated: Bool = false) {
         let now = Date()
         entries.append(HistoryEntry(id: UUID(), date: now, seconds: seconds,
                                     text: text, finalizeSeconds: finalizeSeconds,
-                                    pricePerMinute: Self.pricePerMinute))
+                                    pricePerMinute: Self.pricePerMinute,
+                                    truncated: truncated ? true : nil))
         bump(day: Self.dayKey(now), words: Self.wordCount(text), seconds: seconds)
         save()
         saveStats()

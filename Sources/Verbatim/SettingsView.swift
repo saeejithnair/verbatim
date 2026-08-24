@@ -23,6 +23,9 @@ struct SettingsView: View {
                         }
                     }
                 Toggle("Play sounds", isOn: $prefs.playSounds)
+                if prefs.playSounds {
+                    Toggle("Sound when text pastes", isOn: $prefs.endSound)
+                }
             }
 
             Section("Dictation") {
@@ -45,6 +48,9 @@ struct SettingsView: View {
 
                 Toggle("Insert space after dictation", isOn: $prefs.trailingSpace)
                 caption("So back-to-back dictations don't run together.")
+
+                TextField("Languages", text: $prefs.languages, prompt: Text("auto"))
+                caption("ISO codes, e.g. \"en\". Locking a language stops mid-sentence drift into other scripts. Empty = auto-detect.")
             }
 
             Section("Keywords") {

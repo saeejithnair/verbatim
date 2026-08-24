@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 
 /// Pastes text into the frontmost app via the clipboard and a synthesized
 /// Cmd+V, then restores the previous clipboard.
@@ -11,8 +12,19 @@ enum Paster {
     /// makes them paste the old contents instead of the transcription.
     static let restoreDelay: TimeInterval = 1.5
 
-    static func insertText(_ text: String) {
+    /// Returns false when secure event input (password fields, some
+    /// terminals, Cursor) would swallow the synthesized Cmd+V — the text is
+    /// left on the clipboard instead of being silently lost.
+    @discardableResult
+    static func insertText(_ text: String) -> Bool {
         let pasteboard = NSPasteboard.general
+
+        if IsSecureEventInputEnabled() {
+            pasteboard.declareTypes([.string], owner: nil)
+            pasteboard.setString(text, forType: .string)
+            return false
+        }
+
         let saved = savedContents(of: pasteboard)
 
         pasteboard.declareTypes([.string], owner: nil)
@@ -21,7 +33,7 @@ enum Paster {
 
         sendCmdV()
 
-        guard let saved else { return }
+        guard let saved else { return true }
         DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) {
             // A different changeCount means someone else took the clipboard;
             // restoring would clobber their data.
@@ -31,6 +43,7 @@ enum Paster {
                 pasteboard.setData(data, forType: type)
             }
         }
+        return true
     }
 
     private static func sendCmdV() {

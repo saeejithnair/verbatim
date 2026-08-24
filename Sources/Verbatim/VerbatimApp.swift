@@ -53,19 +53,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in await AppShared.state.recoverPendingAudio() }
     }
 
-    /// Accessibility can be granted while the app runs; poll until it is,
-    /// then (re)create the event tap so no relaunch is needed.
+    /// Accessibility can be granted while the app runs, and tap creation can
+    /// fail transiently (secure input, permission churn): poll until both the
+    /// trust and the tap are live, so no relaunch is ever needed.
     private func updateTrust() {
         let trusted = AXIsProcessTrusted()
-        Task { @MainActor in AppShared.state.accessibilityGranted = trusted }
+        var active = false
         if trusted {
+            active = HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
+        }
+        Task { @MainActor in
+            AppShared.state.accessibilityGranted = trusted
+            AppShared.state.hotkeyActive = active
+        }
+        if trusted && active {
             trustTimer?.invalidate()
             trustTimer = nil
-            let active = HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
-            Task { @MainActor in AppShared.state.hotkeyActive = active }
         } else if trustTimer == nil {
             trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-                if AXIsProcessTrusted() { self?.updateTrust() }
+                self?.updateTrust()
             }
         }
     }

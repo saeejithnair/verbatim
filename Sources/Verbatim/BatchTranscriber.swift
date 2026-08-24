@@ -47,7 +47,8 @@ enum BatchTranscriber {
         var lastError: Error = VerbatimError.transcription("batch transcription failed")
         for model in models {
             do {
-                return try await upload(wavData: wavData, model: model, apiKey: apiKey, prompt: prompt)
+                return try await upload(wavData: wavData, model: model, apiKey: apiKey, prompt: prompt,
+                                        language: Prefs.shared.languageList.first)
             } catch {
                 lastError = error
                 // Try the next model only for model-availability problems.
@@ -59,7 +60,7 @@ enum BatchTranscriber {
     }
 
     private static func upload(wavData: Data, model: String, apiKey: String,
-                               prompt: String) async throws -> String {
+                               prompt: String, language: String? = nil) async throws -> String {
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/transcriptions")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -73,6 +74,7 @@ enum BatchTranscriber {
         }
         field("model", model)
         if !prompt.isEmpty { field("prompt", prompt) }
+        if let language, !language.isEmpty { field("language", language) }
         body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8))
         body.append(wavData)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
