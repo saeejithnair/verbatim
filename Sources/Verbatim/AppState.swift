@@ -1,6 +1,31 @@
 import AppKit
 import SwiftUI
 
+/// One dictation: its mic stream, its realtime socket, and — crucially — a
+/// local copy of every audio chunk, so no failure can lose the words.
+@MainActor
+final class DictationTurn {
+    let transcriber: RealtimeTranscriber
+    let streamer = AudioStreamer()
+    var captured: [Data] = []
+    var peak: Int16 = 0
+    /// Socket died while recording; skip realtime finish, go straight to batch.
+    var degraded = false
+    let startedAt = Date()
+
+    init(apiKey: String) {
+        transcriber = RealtimeTranscriber(apiKey: apiKey)
+    }
+
+    var capturedSeconds: Double {
+        Double(captured.reduce(0) { $0 + $1.count }) / 48_000.0
+    }
+
+    var capturedPCM: Data {
+        captured.reduce(into: Data()) { $0.append($1) }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     enum Phase {
@@ -11,86 +36,272 @@ final class AppState: ObservableObject {
     @Published var phase: Phase = .idle
     @Published var lastTranscript = ""
     @Published var accessibilityGranted = true
+    @Published var hotkeyActive = true
+    @Published var latched = false
 
-    private var streamer: AudioStreamer?
-    private var transcriber: RealtimeTranscriber?
-    private var holdStart: Date?
+    private var currentTurn: DictationTurn?
+    private var provisionalCancel: Task<Void, Never>?
+    private var swallowNextKeyUp = false
+    private var pressStartedAt: Date?
+    private var secondPress = false
+    private var finalizingCount = 0
+    /// Pastes held back while a hotkey is physically down, so a synthesized
+    /// Cmd+V never fires with a modifier held. Flushed when the mic is free.
+    private var pendingPastes: [String] = []
 
-    /// Releases shorter than this are accidental taps; nothing is pasted.
+    /// Releases shorter than this are taps, not dictations.
     static let minimumHold: TimeInterval = 0.3
+    /// Two taps within this window latch hands-free recording.
+    static let doubleTapWindow: TimeInterval = 0.35
+    /// Peak sample amplitude below this means the mic delivered silence.
+    static let silenceFloor: Int16 = 500
+
+    // MARK: - Key handling
 
     func keyDown() {
-        switch phase {
-        case .idle, .error: break
-        case .recording, .finalizing: return
+        if latched {
+            // Tap while latched: end the take.
+            swallowNextKeyUp = true
+            latched = false
+            commitCurrentTurn()
+            return
+        }
+        pressStartedAt = Date()
+        if provisionalCancel != nil {
+            // Second press inside the double-tap window. The turn from the
+            // first tap is still recording; whether this press latches or is
+            // a normal hold is decided at its release.
+            provisionalCancel?.cancel()
+            provisionalCancel = nil
+            secondPress = true
+            return
+        }
+        guard currentTurn == nil else { return }
+        startTurn()
+    }
+
+    func keyUp() {
+        if swallowNextKeyUp {
+            swallowNextKeyUp = false
+            return
+        }
+        guard let turn = currentTurn, !latched else { return }
+        let pressHeld = Date().timeIntervalSince(pressStartedAt ?? turn.startedAt)
+
+        if secondPress {
+            secondPress = false
+            if pressHeld < Self.minimumHold {
+                // Double-tap: latch hands-free.
+                latched = true
+            } else {
+                // Tap-then-hold: an ordinary dictation that happened to start
+                // with a stray tap. Commit like any release.
+                commitCurrentTurn()
+            }
+            return
         }
 
+        if pressHeld < Self.minimumHold {
+            // Maybe the first tap of a double-tap latch: keep recording until
+            // the window closes, then treat it as a nevermind.
+            provisionalCancel = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(Self.doubleTapWindow))
+                guard !Task.isCancelled else { return }
+                self?.provisionalCancel = nil
+                self?.cancelCurrentTurn()
+            }
+            return
+        }
+        commitCurrentTurn()
+    }
+
+    func repasteLast() {
+        guard !lastTranscript.isEmpty else {
+            if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
+            return
+        }
+        Paster.insertText(Prefs.shared.trailingSpace ? lastTranscript + " " : lastTranscript)
+        if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }
+    }
+
+    // MARK: - Turn lifecycle
+
+    private func startTurn() {
         guard let apiKey = Prefs.shared.resolvedAPIKey() else {
             fail(VerbatimError.missingAPIKey.localizedDescription)
             return
         }
 
-        holdStart = Date()
-        // Connect while the first words are being spoken; audio is buffered
-        // until the socket opens.
-        let transcriber = RealtimeTranscriber(apiKey: apiKey)
-        self.transcriber = transcriber
-        transcriber.connect()
+        let turn = DictationTurn(apiKey: apiKey)
+        turn.transcriber.onConnectionLost = { [weak self, weak turn] in
+            Task { @MainActor in
+                guard let turn, turn === self?.currentTurn, !turn.degraded else { return }
+                turn.degraded = true
+                if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
+            }
+        }
+        turn.streamer.onChunk = { [weak turn] data, peak in
+            DispatchQueue.main.async {
+                guard let turn else { return }
+                turn.captured.append(data)
+                turn.peak = max(turn.peak, peak)
+                turn.transcriber.append(data)
+            }
+        }
 
-        let streamer = AudioStreamer()
-        streamer.onChunk = { [weak transcriber] data in transcriber?.append(data) }
         do {
-            try streamer.start()
+            try turn.streamer.start()
         } catch {
-            transcriber.cancel()
-            self.transcriber = nil
+            turn.transcriber.cancel()
             fail(error.localizedDescription)
             return
         }
-        self.streamer = streamer
+        turn.transcriber.connect()
+        currentTurn = turn
         phase = .recording
         if Prefs.shared.playSounds { NSSound(named: "Tink")?.play() }
     }
 
-    func keyUp() {
-        guard case .recording = phase, let transcriber else { return }
-        streamer?.stop()
-        streamer = nil
+    private func cancelCurrentTurn() {
+        guard let turn = currentTurn else { return }
+        currentTurn = nil
+        turn.streamer.stop()
+        turn.transcriber.cancel()
+        if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
+        settlePhase()
+    }
 
-        let held = Date().timeIntervalSince(holdStart ?? Date())
-        guard held >= Self.minimumHold else {
-            transcriber.cancel()
-            self.transcriber = nil
-            phase = .idle
+    private func commitCurrentTurn() {
+        guard let turn = currentTurn else { return }
+        currentTurn = nil
+        turn.streamer.stop()
+        finalizingCount += 1
+        settlePhase()
+        Task { await finalize(turn) }
+    }
+
+    private func finalize(_ turn: DictationTurn) async {
+        let releasedAt = Date()
+        var text: String?
+        var failureMessage: String?
+
+        if turn.degraded {
+            turn.transcriber.cancel()
+        } else {
+            do {
+                text = try await turn.transcriber.finish()
+            } catch is CancellationError {
+                // fall through to batch
+            } catch {
+                failureMessage = error.localizedDescription
+            }
+        }
+
+        if text == nil {
+            // Realtime failed: the local buffer is the source of truth.
+            let pcm = turn.capturedPCM
+            if pcm.isEmpty {
+                failureMessage = failureMessage ?? "no audio captured"
+            } else if let apiKey = Prefs.shared.resolvedAPIKey() {
+                let saved = try? BatchTranscriber.savePending(pcm: pcm)
+                do {
+                    text = try await BatchTranscriber.transcribe(
+                        pcm: pcm, apiKey: apiKey, prompt: Self.batchPrompt())
+                    if let saved { try? FileManager.default.removeItem(at: saved) }
+                    failureMessage = nil
+                } catch {
+                    failureMessage = "\(error.localizedDescription) — audio saved, recovered to history on next launch"
+                }
+            }
+        }
+
+        finalizingCount -= 1
+
+        if let text {
+            lastTranscript = text
+            History.shared.add(text: text, seconds: turn.capturedSeconds,
+                               finalizeSeconds: Date().timeIntervalSince(releasedAt))
+            if text.isEmpty {
+                if turn.peak < Self.silenceFloor {
+                    fail("No audio reached the app — check your input device")
+                } else {
+                    if Prefs.shared.playSounds { NSSound(named: "Bottle")?.play() }
+                    settlePhase()
+                }
+            } else {
+                deliver(text)
+                settlePhase()
+            }
+        } else if let failureMessage {
+            fail(failureMessage)
+        } else {
+            settlePhase()
+        }
+    }
+
+    /// Recover WAVs parked by failed turns from previous runs: transcribe
+    /// them into history (never paste — focus is unpredictable at launch).
+    func recoverPendingAudio() async {
+        guard let apiKey = Prefs.shared.resolvedAPIKey() else { return }
+        for url in BatchTranscriber.pendingFiles() {
+            guard let text = try? await BatchTranscriber.transcribe(
+                fileURL: url, apiKey: apiKey, prompt: Self.batchPrompt()) else { continue }
+            History.shared.add(text: text, seconds: BatchTranscriber.duration(of: url))
+            try? FileManager.default.removeItem(at: url)
+            lastTranscript = text
+        }
+    }
+
+    private static func batchPrompt() -> String {
+        var prompt = Prefs.shared.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keywords = Prefs.shared.keywordList
+        if !keywords.isEmpty {
+            prompt += "\nExpect these terms: \(keywords.joined(separator: ", "))."
+        }
+        return prompt
+    }
+
+    // MARK: - Delivery & phase
+
+    private func deliver(_ text: String) {
+        let payload = Prefs.shared.trailingSpace ? text + " " : text
+        if currentTurn != nil {
+            pendingPastes.append(payload)
+        } else {
+            flushPendingPastes()
+            Paster.insertText(payload)
+            if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }
+        }
+    }
+
+    private func flushPendingPastes() {
+        for payload in pendingPastes {
+            Paster.insertText(payload)
+        }
+        pendingPastes.removeAll()
+    }
+
+    private func settlePhase() {
+        if currentTurn != nil {
+            phase = .recording
             return
         }
-
-        phase = .finalizing
-        Task {
-            do {
-                let releasedAt = Date()
-                let text = try await transcriber.finish()
-                self.lastTranscript = text
-                History.shared.add(text: text, seconds: transcriber.streamedSeconds,
-                                   finalizeSeconds: Date().timeIntervalSince(releasedAt))
-                if !text.isEmpty {
-                    Paster.insertText(Prefs.shared.trailingSpace ? text + " " : text)
-                    if Prefs.shared.playSounds { NSSound(named: "Pop")?.play() }
-                }
-                self.phase = .idle
-            } catch is CancellationError {
-                self.phase = .idle
-            } catch {
-                self.fail(error.localizedDescription)
-            }
-            self.transcriber = nil
-        }
+        flushPendingPastes()
+        if case .error = phase { return }
+        phase = finalizingCount > 0 ? .finalizing : .idle
     }
 
     private func fail(_ message: String) {
+        if currentTurn != nil {
+            // Mid-recording: don't hijack the icon; the sound is the signal.
+            if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
+            return
+        }
         phase = .error(message)
         if Prefs.shared.playSounds { NSSound(named: "Basso")?.play() }
     }
+
+    // MARK: - Presentation
 
     var iconColor: Color {
         switch phase {
@@ -113,7 +324,7 @@ final class AppState: ObservableObject {
     var statusLine: String {
         switch phase {
         case .idle: "Hold \(Prefs.shared.hotkey.displayName) to dictate"
-        case .recording: "Listening…"
+        case .recording: latched ? "Listening (latched — tap to finish)…" : "Listening…"
         case .finalizing: "Transcribing…"
         case .error(let message): "Error: \(message)"
         }

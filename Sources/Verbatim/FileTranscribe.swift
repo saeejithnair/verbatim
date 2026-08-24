@@ -46,8 +46,8 @@ private func transcribeFile(path: String) async throws -> String {
         }
         try file.read(into: buffer, frameCount: want)
         if buffer.frameLength == 0 { break }
-        if let data = AudioStreamer.convert(buffer, with: converter, to: AudioStreamer.apiFormat) {
-            transcriber.append(data)
+        if let chunk = AudioStreamer.convert(buffer, with: converter, to: AudioStreamer.apiFormat) {
+            transcriber.append(chunk.data)
         }
     }
 

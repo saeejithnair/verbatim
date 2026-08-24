@@ -7,8 +7,10 @@ struct HistoryEntry: Codable, Identifiable {
     let text: String
     /// Key release → transcript ready. The felt latency.
     let finalizeSeconds: Double?
+    /// Rate at capture time, so a future price change never rewrites the past.
+    let pricePerMinute: Double?
 
-    var cost: Double { seconds / 60 * History.pricePerMinute }
+    var cost: Double { seconds / 60 * (pricePerMinute ?? History.pricePerMinute) }
 }
 
 /// One day's dictation activity. Lifetime stats live separately from the
@@ -76,7 +78,8 @@ final class History: ObservableObject {
     func add(text: String, seconds: Double, finalizeSeconds: Double? = nil) {
         let now = Date()
         entries.append(HistoryEntry(id: UUID(), date: now, seconds: seconds,
-                                    text: text, finalizeSeconds: finalizeSeconds))
+                                    text: text, finalizeSeconds: finalizeSeconds,
+                                    pricePerMinute: Self.pricePerMinute))
         bump(day: Self.dayKey(now), words: Self.wordCount(text), seconds: seconds)
         save()
         saveStats()
@@ -100,15 +103,27 @@ final class History: ObservableObject {
         days[day] = stat
     }
 
+    /// Serial queue keeps writes ordered; snapshots keep them off the main
+    /// thread, so a growing history never costs a paste any latency.
+    nonisolated private static let ioQueue = DispatchQueue(label: "verbatim.history.io", qos: .utility)
+
     private func save() {
-        if let data = try? JSONEncoder().encode(entries) {
-            try? data.write(to: fileURL)
+        let snapshot = entries
+        let url = fileURL
+        Self.ioQueue.async {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: url)
+            }
         }
     }
 
     private func saveStats() {
-        if let data = try? JSONEncoder().encode(days) {
-            try? data.write(to: statsURL)
+        let snapshot = days
+        let url = statsURL
+        Self.ioQueue.async {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: url)
+            }
         }
     }
 }

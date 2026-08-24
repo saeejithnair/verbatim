@@ -9,7 +9,9 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private let apiKey: String
     private let queue = DispatchQueue(label: "verbatim.transcriber")
 
-    private var session: URLSession?
+    /// Shared across turns so TLS session state is reused — repeat
+    /// connections handshake noticeably faster than cold ones.
+    private static let session = URLSession(configuration: .default)
     private var task: URLSessionWebSocketTask?
 
     private var socketOpen = false
@@ -24,6 +26,11 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private var fatalError: String?
     private var finishContinuation: CheckedContinuation<String, Error>?
 
+    /// Fired once if the socket dies while recording (before finish());
+    /// the caller still has the local audio buffer and can fall back to
+    /// batch transcription.
+    var onConnectionLost: (() -> Void)?
+
     init(apiKey: String) {
         self.apiKey = apiKey
     }
@@ -31,9 +38,8 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     func connect() {
         var request = URLRequest(url: URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-        self.session = session
-        let task = session.webSocketTask(with: request)
+        let task = Self.session.webSocketTask(with: request)
+        task.delegate = self
         self.task = task
         receiveLoop(task)
         task.resume()
@@ -226,10 +232,12 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     }
 
     private func socketFailed(_ detail: String) {
+        let firstFailure = !socketClosed
         socketOpen = false
         socketClosed = true
         guard finishContinuation != nil else {
             if fatalError == nil { fatalError = detail }
+            if firstFailure { onConnectionLost?() }
             return
         }
         let text = currentText()
@@ -255,8 +263,6 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         socketClosed = true
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
-        session?.finishTasksAndInvalidate()
-        session = nil
     }
 
     private func sendJSON(_ object: [String: Any]) {

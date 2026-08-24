@@ -42,10 +42,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotkeyMonitor.shared.onKeyUp = {
             Task { @MainActor in AppShared.state.keyUp() }
         }
+        HotkeyMonitor.shared.onRepaste = {
+            Task { @MainActor in AppShared.state.repasteLast() }
+        }
 
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         AXIsProcessTrustedWithOptions(options as CFDictionary)
         updateTrust()
+
+        Task { @MainActor in await AppShared.state.recoverPendingAudio() }
     }
 
     /// Accessibility can be granted while the app runs; poll until it is,
@@ -56,7 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if trusted {
             trustTimer?.invalidate()
             trustTimer = nil
-            HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
+            let active = HotkeyMonitor.shared.start(modifierKey: Prefs.shared.hotkey)
+            Task { @MainActor in AppShared.state.hotkeyActive = active }
         } else if trustTimer == nil {
             trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                 if AXIsProcessTrusted() { self?.updateTrust() }
@@ -93,6 +99,19 @@ struct MainView: View {
                         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
                         NSWorkspace.shared.open(url)
                     }
+                }
+                .padding(10)
+                .background(.yellow.opacity(0.12))
+                Divider()
+            }
+
+            if state.accessibilityGranted && !state.hotkeyActive {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Text("The hotkey listener couldn't start. Toggle Accessibility off and on for Verbatim, then relaunch.")
+                        .font(.callout)
+                    Spacer()
                 }
                 .padding(10)
                 .background(.yellow.opacity(0.12))

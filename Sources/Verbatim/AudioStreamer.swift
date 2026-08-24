@@ -8,10 +8,25 @@ final class AudioStreamer {
 
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
+    private var configObserver: NSObjectProtocol?
 
-    var onChunk: ((Data) -> Void)?
+    /// Converted PCM chunk plus its peak sample amplitude (for dead-mic
+    /// detection).
+    var onChunk: ((Data, Int16) -> Void)?
 
     func start() throws {
+        try installTap()
+        // AirPods connecting, default-device switches, etc. reconfigure the
+        // engine underneath the tap; reinstall so the stream survives.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            try? self?.installTap()
+        }
+    }
+
+    private func installTap() throws {
+        engine.inputNode.removeTap(onBus: 0)
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0,
@@ -22,15 +37,21 @@ final class AudioStreamer {
 
         input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buffer, _ in
             guard let self,
-                  let data = Self.convert(buffer, with: converter, to: Self.apiFormat),
-                  !data.isEmpty else { return }
-            self.onChunk?(data)
+                  let chunk = Self.convert(buffer, with: converter, to: Self.apiFormat),
+                  !chunk.data.isEmpty else { return }
+            self.onChunk?(chunk.data, chunk.peak)
         }
         engine.prepare()
-        try engine.start()
+        if !engine.isRunning {
+            try engine.start()
+        }
     }
 
     func stop() {
+        if let configObserver {
+            NotificationCenter.default.removeObserver(configObserver)
+            self.configObserver = nil
+        }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
@@ -38,7 +59,7 @@ final class AudioStreamer {
 
     static func convert(_ buffer: AVAudioPCMBuffer,
                         with converter: AVAudioConverter,
-                        to outFormat: AVAudioFormat) -> Data? {
+                        to outFormat: AVAudioFormat) -> (data: Data, peak: Int16)? {
         guard buffer.frameLength > 0 else { return nil }
         let ratio = outFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
@@ -61,6 +82,12 @@ final class AudioStreamer {
         guard status != .error, out.frameLength > 0, let channel = out.int16ChannelData else {
             return nil
         }
-        return Data(bytes: channel[0], count: Int(out.frameLength) * MemoryLayout<Int16>.size)
+        let frames = Int(out.frameLength)
+        var peak: Int16 = 0
+        for i in 0..<frames {
+            let magnitude = Int16(clamping: abs(Int(channel[0][i])))
+            if magnitude > peak { peak = magnitude }
+        }
+        return (Data(bytes: channel[0], count: frames * MemoryLayout<Int16>.size), peak)
     }
 }

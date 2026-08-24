@@ -1,13 +1,27 @@
+import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var prefs = Prefs.shared
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         Form {
             Section("General") {
                 SecureField("OpenAI API key", text: $prefs.apiKey)
                 caption("Stored only on this Mac. Leave empty to use OPENAI_API_KEY from your environment.")
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, enabled in
+                        do {
+                            if enabled {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            launchAtLogin = SMAppService.mainApp.status == .enabled
+                        }
+                    }
                 Toggle("Play sounds", isOn: $prefs.playSounds)
             }
 
@@ -20,6 +34,7 @@ struct SettingsView: View {
                 .onChange(of: prefs.hotkey) { _, newKey in
                     HotkeyMonitor.shared.start(modifierKey: newKey)
                 }
+                caption("Hold to dictate. Double-tap to latch hands-free, tap again to finish. ⌘ + the key pastes the last transcript again.")
 
                 Picker("Latency", selection: $prefs.delay) {
                     ForEach(TranscriptionDelay.allCases) { delay in

@@ -64,7 +64,23 @@ Accessibility on every rebuild.
 ## Use
 
 Hold **Right ⌥ Option** (configurable), speak, release. A soft tick marks the
-start, a pop marks the paste. Taps shorter than 0.3 s are ignored.
+start, a pop marks the paste.
+
+- **Double-tap** the hotkey to latch hands-free recording — no finger stamina
+  required for long takes. Tap once more to finish and paste.
+- **⌘ + the hotkey** pastes the most recent transcript again — instant
+  recovery when a paste landed in the wrong window.
+- A stray tap, or a dictation that produced no text, answers with a soft
+  "nevermind" sound rather than silence. If the microphone delivered nothing
+  at all (a Bluetooth device stealing the input mid-sentence, say), the app
+  says so instead of failing quietly.
+
+Your words can't be lost: every turn's audio is buffered locally while it
+streams. If the connection dies mid-sentence you hear a low warning but keep
+talking — on release the buffered audio is transcribed through the batch API
+instead. If even that fails, the audio is saved and recovered into your
+history the next time the app launches. Back-to-back dictations queue cleanly;
+starting a new turn while the previous one is still finalizing loses nothing.
 
 Settings:
 
@@ -75,7 +91,8 @@ Settings:
 - **Keywords** — a token field of names and jargon you actually say. These are
   sent with every request and stop technical terms from being mangled.
 - **Prompt** — the transcription instruction. The default demands strict
-  verbatim output; make it yours.
+  verbatim output; make it yours (one click resets it).
+- **Launch at login** — so the hotkey is always live.
 
 ## Test without a mic
 

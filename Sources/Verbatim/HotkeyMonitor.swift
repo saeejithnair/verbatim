@@ -16,12 +16,15 @@ final class HotkeyMonitor {
 
     var onKeyDown: (() -> Void)?
     var onKeyUp: (() -> Void)?
+    /// ⌘ + the hotkey (when the hotkey itself isn't a Command key).
+    var onRepaste: (() -> Void)?
 
     private init() {}
 
-    func start(modifierKey: ModifierKey) {
+    @discardableResult
+    func start(modifierKey: ModifierKey) -> Bool {
         stop()
-        guard modifierKey != .none else { return }
+        guard modifierKey != .none else { return true }
         selectedKey = modifierKey
 
         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
@@ -43,7 +46,7 @@ final class HotkeyMonitor {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             NSLog("HotkeyMonitor: failed to create event tap — check Accessibility permission")
-            return
+            return false
         }
 
         eventTap = tap
@@ -52,6 +55,7 @@ final class HotkeyMonitor {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
         }
+        return true
     }
 
     func stop() {
@@ -77,6 +81,16 @@ final class HotkeyMonitor {
         guard keyCode == selectedKey.keyCode else { return }
 
         let pressed = event.flags.contains(selectedKey.cgEventFlag)
+
+        // ⌘ + hotkey = re-paste gesture, not a dictation. The matching
+        // release is ignored because isPressed was never set.
+        if pressed && !isPressed
+            && selectedKey.cgEventFlag != .maskCommand
+            && event.flags.contains(.maskCommand) {
+            DispatchQueue.main.async { self.onRepaste?() }
+            return
+        }
+
         if pressed && !isPressed {
             isPressed = true
             DispatchQueue.main.async { self.onKeyDown?() }
