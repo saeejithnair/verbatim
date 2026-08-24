@@ -30,6 +30,10 @@ enum AudioDevices {
         inputDevices().first { $0.name == target }?.id
     }
 
+    static func deviceName(_ id: AudioDeviceID) -> String? {
+        name(of: id)
+    }
+
     private static func hasInput(_ id: AudioDeviceID) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,

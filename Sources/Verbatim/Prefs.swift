@@ -27,6 +27,7 @@ final class Prefs: ObservableObject {
     @Published var prompt: String { didSet { defaults.set(prompt, forKey: "prompt") } }
     @Published var keywords: String { didSet { defaults.set(keywords, forKey: "keywords") } }
     @Published var playSounds: Bool { didSet { defaults.set(playSounds, forKey: "playSounds") } }
+    @Published var startSound: Bool { didSet { defaults.set(startSound, forKey: "startSound") } }
     @Published var endSound: Bool { didSet { defaults.set(endSound, forKey: "endSound") } }
     @Published var trailingSpace: Bool { didSet { defaults.set(trailingSpace, forKey: "trailingSpace") } }
     @Published var languages: String { didSet { defaults.set(languages, forKey: "languages") } }
@@ -40,6 +41,7 @@ final class Prefs: ObservableObject {
         prompt = defaults.string(forKey: "prompt") ?? Self.defaultPrompt
         keywords = defaults.string(forKey: "keywords") ?? Self.defaultKeywords
         playSounds = defaults.object(forKey: "playSounds") as? Bool ?? true
+        startSound = defaults.object(forKey: "startSound") as? Bool ?? true
         endSound = defaults.object(forKey: "endSound") as? Bool ?? true
         trailingSpace = defaults.object(forKey: "trailingSpace") as? Bool ?? true
         languages = defaults.string(forKey: "languages") ?? ""

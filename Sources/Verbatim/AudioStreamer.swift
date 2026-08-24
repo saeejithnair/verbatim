@@ -38,12 +38,27 @@ final class AudioStreamer {
         // Pin the chosen input device (falls back to system default if it's
         // gone). Must happen before the format is read.
         let pinnedName = Prefs.shared.inputDevice
-        if !pinnedName.isEmpty,
-           var deviceID = AudioDevices.device(named: pinnedName),
-           let audioUnit = input.audioUnit {
-            AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_CurrentDevice,
-                                 kAudioUnitScope_Global, 0, &deviceID,
-                                 UInt32(MemoryLayout<AudioDeviceID>.size))
+        if !pinnedName.isEmpty {
+            if var deviceID = AudioDevices.device(named: pinnedName),
+               let audioUnit = input.audioUnit {
+                let status = AudioUnitSetProperty(
+                    audioUnit, kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global, 0, &deviceID,
+                    UInt32(MemoryLayout<AudioDeviceID>.size))
+                NSLog("Verbatim: pin '%@' status %d", pinnedName, status)
+            } else {
+                NSLog("Verbatim: pin '%@' failed — device or audio unit missing", pinnedName)
+            }
+        }
+        // Read back which device the input is actually using.
+        if let audioUnit = input.audioUnit {
+            var actualID = AudioDeviceID(0)
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            if AudioUnitGetProperty(audioUnit, kAudioOutputUnitProperty_CurrentDevice,
+                                    kAudioUnitScope_Global, 0, &actualID, &size) == noErr {
+                NSLog("Verbatim: capturing from '%@'",
+                      AudioDevices.deviceName(actualID) ?? "device \(actualID)")
+            }
         }
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0,

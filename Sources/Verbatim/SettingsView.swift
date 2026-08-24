@@ -25,6 +25,7 @@ struct SettingsView: View {
                     }
                 Toggle("Play sounds", isOn: $prefs.playSounds)
                 if prefs.playSounds {
+                    Toggle("Sound when listening starts", isOn: $prefs.startSound)
                     Toggle("Sound when text pastes", isOn: $prefs.endSound)
                 }
             }

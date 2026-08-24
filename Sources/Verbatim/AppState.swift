@@ -168,7 +168,11 @@ final class AppState: ObservableObject {
                 // apart, and speech before the wake-up never reaches the Mac.
                 if !turn.heardAudio && peak > 300 {
                     turn.heardAudio = true
-                    if Prefs.shared.playSounds { Sfx.begin?.play() }
+                    NSLog("Verbatim: first audible chunk %.0f ms after keyDown",
+                          Date().timeIntervalSince(turn.startedAt) * 1000)
+                    if Prefs.shared.playSounds && Prefs.shared.startSound {
+                        Sfx.begin?.play()
+                    }
                 }
             }
         }
