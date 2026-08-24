@@ -41,7 +41,16 @@ struct SettingsView: View {
                     .font(.body)
                     .frame(minHeight: 90)
                     .scrollContentBackground(.hidden)
-                caption("Sent with every dictation. The default demands strict verbatim output.")
+                HStack {
+                    caption("Sent with every dictation. The default demands strict verbatim output.")
+                    Spacer()
+                    if prefs.prompt != Prefs.defaultPrompt {
+                        Button("Reset to Default") {
+                            withAnimation { prefs.prompt = Prefs.defaultPrompt }
+                        }
+                        .controlSize(.small)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
