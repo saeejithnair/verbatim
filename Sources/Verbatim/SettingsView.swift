@@ -63,25 +63,39 @@ struct KeywordsEditor: View {
     private var words: [String] { prefs.keywordList }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             if words.isEmpty {
-                Text("No keywords yet. Add the names and jargon you actually say — they stop getting mangled.")
+                Text("Add the names and jargon you actually say — they stop getting mangled.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-            } else {
-                FlowLayout(spacing: 8) {
-                    ForEach(words, id: \.self) { word in
-                        KeywordChip(word: word) { remove(word) }
-                    }
-                }
             }
 
-            TextField("Add a keyword, press Return", text: $draft)
-                .textFieldStyle(.roundedBorder)
-                .focused($fieldFocused)
-                .onSubmit(addDraft)
+            // The text field lives inside the flow, where the next chip will
+            // appear — type, Return, chip. Backspace on an empty field
+            // removes the last chip.
+            FlowLayout(spacing: 8) {
+                ForEach(words, id: \.self) { word in
+                    KeywordChip(word: word) { remove(word) }
+                }
+
+                TextField("", text: $draft,
+                          prompt: Text(words.isEmpty ? "Type a keyword, press Return" : "Add…"))
+                    .textFieldStyle(.plain)
+                    .labelsHidden()
+                    .focused($fieldFocused)
+                    .onSubmit(addDraft)
+                    .onKeyPress(.delete) {
+                        guard draft.isEmpty, let last = words.last else { return .ignored }
+                        remove(last)
+                        return .handled
+                    }
+                    .frame(minWidth: 140, maxWidth: 180)
+                    .padding(.vertical, 5)
+            }
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture { fieldFocused = true }
     }
 
     private func addDraft() {
