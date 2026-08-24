@@ -164,7 +164,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             "model": "gpt-live-transcribe",
             "delay": Prefs.shared.delay.rawValue,
         ]
-        let prompt = Prefs.shared.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        var prompt = Prefs.shared.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let clause = Prefs.shared.languageClause {
+            prompt = prompt.isEmpty ? clause : prompt + "\n" + clause
+        }
         if !prompt.isEmpty { transcription["prompt"] = prompt }
         let keywords = Prefs.shared.keywordList
         if !keywords.isEmpty { transcription["keywords"] = keywords }

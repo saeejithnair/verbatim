@@ -78,6 +78,16 @@ final class Prefs: ObservableObject {
             .map { $0.lowercased() }
             .filter { !$0.isEmpty }
     }
+
+    /// Prompt sentence generated from the language setting — belt to the
+    /// `languages` parameter's suspenders. Nil when auto-detecting.
+    var languageClause: String? {
+        let names = languageList.compactMap {
+            Locale(identifier: "en").localizedString(forLanguageCode: $0) ?? $0
+        }
+        guard !names.isEmpty else { return nil }
+        return "The speaker speaks only \(names.joined(separator: " or ")). Transcribe in that language."
+    }
 }
 
 enum VerbatimError: LocalizedError {

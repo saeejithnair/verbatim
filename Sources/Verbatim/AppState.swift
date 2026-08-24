@@ -291,6 +291,9 @@ final class AppState: ObservableObject {
         if !keywords.isEmpty {
             prompt += "\nExpect these terms: \(keywords.joined(separator: ", "))."
         }
+        if let clause = Prefs.shared.languageClause {
+            prompt += "\n" + clause
+        }
         return prompt
     }
 
