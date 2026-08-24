@@ -12,6 +12,13 @@ enum Paster {
     /// makes them paste the old contents instead of the transcription.
     static let restoreDelay: TimeInterval = 1.5
 
+    /// The user's clipboard is snapshotted once per paste *burst*, not per
+    /// paste: back-to-back dictations inside the restore window would
+    /// otherwise snapshot the previous transcript and restore that instead
+    /// of the user's data, destroying it. Main thread only.
+    private static var savedSnapshot: [NSPasteboard.PasteboardType: Data]?
+    private static var pendingRestore: DispatchWorkItem?
+
     /// Returns false when secure event input (password fields, some
     /// terminals, Cursor) would swallow the synthesized Cmd+V — the text is
     /// left on the clipboard instead of being silently lost.
@@ -25,7 +32,13 @@ enum Paster {
             return false
         }
 
-        let saved = savedContents(of: pasteboard)
+        // Only the first paste of a burst sees the user's real clipboard.
+        let midBurst = pendingRestore != nil
+        pendingRestore?.cancel()
+        pendingRestore = nil
+        if !midBurst {
+            savedSnapshot = savedContents(of: pasteboard)
+        }
 
         pasteboard.declareTypes([.string], owner: nil)
         pasteboard.setString(text, forType: .string)
@@ -33,16 +46,20 @@ enum Paster {
 
         sendCmdV()
 
-        guard let saved else { return true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) {
+        let work = DispatchWorkItem {
+            pendingRestore = nil
+            defer { savedSnapshot = nil }
             // A different changeCount means someone else took the clipboard;
             // restoring would clobber their data.
-            guard pasteboard.changeCount == changeCount else { return }
-            pasteboard.declareTypes(Array(saved.keys), owner: nil)
-            for (type, data) in saved {
+            guard pasteboard.changeCount == changeCount,
+                  let snapshot = savedSnapshot, !snapshot.isEmpty else { return }
+            pasteboard.declareTypes(Array(snapshot.keys), owner: nil)
+            for (type, data) in snapshot {
                 pasteboard.setData(data, forType: type)
             }
         }
+        pendingRestore = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay, execute: work)
         return true
     }
 

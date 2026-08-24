@@ -16,8 +16,12 @@ enum BatchTranscriber {
 
     static func savePending(pcm: Data) throws -> URL {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let url = pendingDir.appendingPathComponent("turn-\(formatter.string(from: Date())).wav")
+        // Uniquified: two turns failing in the same second must not
+        // overwrite each other — this file is the last copy of the words.
+        let name = "turn-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(8)).wav"
+        let url = pendingDir.appendingPathComponent(name)
         try wav(from: pcm).write(to: url)
         return url
     }
@@ -35,28 +39,35 @@ enum BatchTranscriber {
         return Double(max(0, bytes - 44)) / 48_000.0
     }
 
-    static func transcribe(pcm: Data, apiKey: String, prompt: String) async throws -> String {
-        try await transcribe(wavData: wav(from: pcm), apiKey: apiKey, prompt: prompt)
+    static func transcribe(pcm: Data, apiKey: String, prompt: String,
+                           language: String? = nil) async throws -> String {
+        try await transcribe(wavData: wav(from: pcm), apiKey: apiKey, prompt: prompt, language: language)
     }
 
-    static func transcribe(fileURL: URL, apiKey: String, prompt: String) async throws -> String {
-        try await transcribe(wavData: try Data(contentsOf: fileURL), apiKey: apiKey, prompt: prompt)
+    static func transcribe(fileURL: URL, apiKey: String, prompt: String,
+                           language: String? = nil) async throws -> String {
+        try await transcribe(wavData: try Data(contentsOf: fileURL), apiKey: apiKey,
+                             prompt: prompt, language: language)
     }
 
-    private static func transcribe(wavData: Data, apiKey: String, prompt: String) async throws -> String {
+    // Language arrives as a parameter: this runs off the main actor, and
+    // Prefs is main-thread UI state.
+    private static func transcribe(wavData: Data, apiKey: String, prompt: String,
+                                   language: String?) async throws -> String {
         var lastError: Error = VerbatimError.transcription("batch transcription failed")
         for model in models {
             do {
-                return try await upload(wavData: wavData, model: model, apiKey: apiKey, prompt: prompt,
-                                        language: Prefs.shared.languageList.first)
-            } catch {
-                lastError = error
-                // Try the next model only for model-availability problems.
-                let message = error.localizedDescription.lowercased()
-                guard message.contains("model") || message.contains("not found") else { throw error }
+                return try await upload(wavData: wavData, model: model, apiKey: apiKey,
+                                        prompt: prompt, language: language)
+            } catch let error as ModelUnavailable {
+                lastError = VerbatimError.transcription(error.message)
             }
         }
         throw lastError
+    }
+
+    private struct ModelUnavailable: Error {
+        let message: String
     }
 
     private static func upload(wavData: Data, model: String, apiKey: String,
@@ -81,13 +92,27 @@ enum BatchTranscriber {
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         request.httpBody = body
 
-        let (data, _) = try await URLSession.shared.data(for: request)
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw VerbatimError.transcription("unreadable batch response")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        if (200..<300).contains(status), let text = object?["text"] as? String {
+            return text
         }
-        if let text = object["text"] as? String { return text }
-        let message = ((object["error"] as? [String: Any])?["message"] as? String) ?? "batch transcription failed"
-        throw VerbatimError.transcription(message)
+        let apiMessage = (object?["error"] as? [String: Any])?["message"] as? String
+        switch status {
+        case 404:
+            // Model gone or renamed — the only case where trying the next
+            // model in the fallback list makes sense.
+            throw ModelUnavailable(message: apiMessage ?? "model \(model) unavailable")
+        case 401, 403:
+            throw VerbatimError.transcription("API key rejected — check it in Settings")
+        case 429:
+            throw VerbatimError.transcription("rate limited by OpenAI")
+        case 500...599:
+            throw VerbatimError.transcription("OpenAI outage (HTTP \(status))")
+        default:
+            throw VerbatimError.transcription(apiMessage ?? "batch transcription failed (HTTP \(status))")
+        }
     }
 
     /// 24 kHz mono 16-bit PCM → WAV.

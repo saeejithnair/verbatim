@@ -19,7 +19,6 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private var pendingAudio: [Data] = []
     private var committed = false
     private var commitSent = false
-    private var appendedBytes = 0
     private var sessionPayload: [String: Any] = [:]
 
     private var itemOrder: [String] = []
@@ -61,11 +60,9 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             // finish would ride the full timeout.
             guard !self.committed else { return }
             if self.socketOpen {
-                self.appendedBytes += audio.count
                 self.sendJSON(["type": "input_audio_buffer.append",
                                "audio": audio.base64EncodedString()])
             } else if !self.socketClosed {
-                self.appendedBytes += audio.count
                 self.pendingAudio.append(audio)
             }
         }
@@ -86,14 +83,13 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         sendJSON(["type": "input_audio_buffer.commit"])
     }
 
-    /// Duration of audio streamed this turn, for cost accounting.
-    var streamedSeconds: Double {
-        queue.sync { Double(appendedBytes) / (24000.0 * 2.0) }
-    }
-
     func finish(timeout: TimeInterval = 12) async throws -> String {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             self.queue.async {
+                guard self.finishContinuation == nil else {
+                    cont.resume(throwing: VerbatimError.transcription("finish() called twice"))
+                    return
+                }
                 if let fatal = self.fatalError {
                     cont.resume(throwing: VerbatimError.transcription(fatal))
                     self.teardown()
@@ -241,10 +237,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             let message = (errorObject?["message"] as? String) ?? text
             let code = (errorObject?["code"] as? String) ?? ""
             // Committing a near-empty buffer (tap-and-release) errors; that is
-            // just an empty dictation, not a failure. Match the code first —
-            // the message wording is not a contract.
-            if committed && (code == "input_audio_buffer_commit_empty"
-                             || message.lowercased().contains("buffer")) {
+            // just an empty dictation, not a failure. Code match ONLY: a
+            // substring match would classify "buffer too large" as success
+            // and skip the batch fallback for the exact turns that need it.
+            if committed && code == "input_audio_buffer_commit_empty" {
                 complete(.success(currentText()))
             } else if finishContinuation != nil {
                 complete(.failure(VerbatimError.transcription(message)))

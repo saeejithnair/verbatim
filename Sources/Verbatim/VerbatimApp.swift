@@ -37,11 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !granted { NSLog("Microphone access denied") }
         }
 
-        HotkeyMonitor.shared.onKeyDown = {
-            Task { @MainActor in AppShared.state.keyDown() }
+        HotkeyMonitor.shared.onKeyDown = { eventTime in
+            Task { @MainActor in AppShared.state.keyDown(at: eventTime) }
         }
-        HotkeyMonitor.shared.onKeyUp = {
-            Task { @MainActor in AppShared.state.keyUp() }
+        HotkeyMonitor.shared.onKeyUp = { eventTime in
+            Task { @MainActor in AppShared.state.keyUp(at: eventTime) }
         }
         HotkeyMonitor.shared.onRepaste = {
             Task { @MainActor in AppShared.state.repasteLast() }

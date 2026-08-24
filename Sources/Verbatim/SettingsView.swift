@@ -35,7 +35,7 @@ struct SettingsView: View {
                     }
                 }
                 .onChange(of: prefs.hotkey) { _, newKey in
-                    HotkeyMonitor.shared.start(modifierKey: newKey)
+                    AppShared.state.hotkeyActive = HotkeyMonitor.shared.start(modifierKey: newKey)
                 }
                 caption("Hold to dictate. Double-tap to latch hands-free, tap again to finish. ⌘ + the key pastes the last transcript again.")
 

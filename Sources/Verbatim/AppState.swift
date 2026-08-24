@@ -42,7 +42,9 @@ final class AppState: ObservableObject {
     private var currentTurn: DictationTurn?
     private var provisionalCancel: Task<Void, Never>?
     private var swallowNextKeyUp = false
-    private var pressStartedAt: Date?
+    /// Hardware event time (uptime seconds) — Date() at handler time lies
+    /// when startTurn's blocking work delays the run loop.
+    private var pressStartedUptime: TimeInterval?
     private var secondPress = false
     private var finalizingCount = 0
     /// Screen lock or a tap timeout can eat the key-up event, wedging the app
@@ -59,10 +61,16 @@ final class AppState: ObservableObject {
     static let doubleTapWindow: TimeInterval = 0.35
     /// Peak sample amplitude below this means the mic delivered silence.
     static let silenceFloor: Int16 = 500
+    /// A forgotten latched take (or a truly lost release) auto-commits here.
+    static let maxTurnSeconds: TimeInterval = 900
+
+    nonisolated private static func uptimeNow() -> TimeInterval {
+        TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
 
     // MARK: - Key handling
 
-    func keyDown() {
+    func keyDown(at eventTime: TimeInterval = AppState.uptimeNow()) {
         if latched {
             // Tap while latched: end the take.
             swallowNextKeyUp = true
@@ -70,7 +78,7 @@ final class AppState: ObservableObject {
             commitCurrentTurn()
             return
         }
-        pressStartedAt = Date()
+        pressStartedUptime = eventTime
         if provisionalCancel != nil {
             // Second press inside the double-tap window. The turn from the
             // first tap is still recording; whether this press latches or is
@@ -84,13 +92,14 @@ final class AppState: ObservableObject {
         startTurn()
     }
 
-    func keyUp() {
+    func keyUp(at eventTime: TimeInterval = AppState.uptimeNow()) {
         if swallowNextKeyUp {
             swallowNextKeyUp = false
+            settlePhase()
             return
         }
-        guard let turn = currentTurn, !latched else { return }
-        let pressHeld = Date().timeIntervalSince(pressStartedAt ?? turn.startedAt)
+        guard currentTurn != nil, !latched else { return }
+        let pressHeld = eventTime - (pressStartedUptime ?? eventTime)
 
         if secondPress {
             secondPress = false
@@ -108,6 +117,7 @@ final class AppState: ObservableObject {
         if pressHeld < Self.minimumHold {
             // Maybe the first tap of a double-tap latch: keep recording until
             // the window closes, then treat it as a nevermind.
+            provisionalCancel?.cancel()
             provisionalCancel = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(Self.doubleTapWindow))
                 guard !Task.isCancelled else { return }
@@ -177,17 +187,35 @@ final class AppState: ObservableObject {
         phase = .recording
 
         holdWatchdog?.invalidate()
-        holdWatchdog = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.watchdogTick() }
         }
+        // .common so the watchdog survives menu tracking and window resize —
+        // exactly when the main thread is busiest.
+        RunLoop.main.add(timer, forMode: .common)
+        holdWatchdog = timer
     }
 
     private func watchdogTick() {
-        guard currentTurn != nil, !latched, provisionalCancel == nil, !secondPress else { return }
+        guard let turn = currentTurn else { return }
+
+        // A forgotten latched take (or a wedge this watchdog can't see)
+        // commits rather than recording forever.
+        if Date().timeIntervalSince(turn.startedAt) > Self.maxTurnSeconds {
+            if Prefs.shared.playSounds { Sfx.trouble?.play() }
+            latched = false
+            commitCurrentTurn()
+            return
+        }
+
+        guard !latched, provisionalCancel == nil, !secondPress else { return }
         let flag = Prefs.shared.hotkey.cgEventFlag
         guard flag != [] else { return }
         if !CGEventSource.flagsState(.combinedSessionState).contains(flag) {
             keyUp()
+            // Keep the monitor's press state in agreement so a delayed real
+            // release is filtered there instead of double-firing here.
+            HotkeyMonitor.shared.resetPressState()
         }
     }
 
@@ -229,8 +257,9 @@ final class AppState: ObservableObject {
             turn.transcriber.cancel()
         } else {
             do {
-                // Long rambles need proportionally longer to flush.
-                let timeout = max(12, turn.capturedSeconds * 0.4)
+                // Long rambles need proportionally longer to flush — but a
+                // runaway take must not pin "Transcribing…" for minutes.
+                let timeout = min(60, max(12, turn.capturedSeconds * 0.4))
                 text = try await turn.transcriber.finish(timeout: timeout)
             } catch is CancellationError {
                 // fall through to batch
@@ -241,18 +270,24 @@ final class AppState: ObservableObject {
 
         if text == nil {
             // Realtime failed: the local buffer is the source of truth.
+            // Park it on disk before anything that can still fail.
             let pcm = turn.captured
             if pcm.isEmpty {
                 failureMessage = failureMessage ?? "no audio captured"
-            } else if let apiKey = Prefs.shared.resolvedAPIKey() {
+            } else {
                 let saved = try? BatchTranscriber.savePending(pcm: pcm)
-                do {
-                    text = try await BatchTranscriber.transcribe(
-                        pcm: pcm, apiKey: apiKey, prompt: Self.batchPrompt())
-                    if let saved { try? FileManager.default.removeItem(at: saved) }
-                    failureMessage = nil
-                } catch {
-                    failureMessage = "\(error.localizedDescription) — audio saved, recovered to history on next launch"
+                if let apiKey = Prefs.shared.resolvedAPIKey() {
+                    do {
+                        text = try await BatchTranscriber.transcribe(
+                            pcm: pcm, apiKey: apiKey, prompt: Self.batchPrompt(),
+                            language: Prefs.shared.languageList.first)
+                        if let saved { try? FileManager.default.removeItem(at: saved) }
+                        failureMessage = nil
+                    } catch {
+                        failureMessage = "\(error.localizedDescription) — audio saved, recovered to history on next launch"
+                    }
+                } else {
+                    failureMessage = "no API key — audio saved, recovered to history on next launch"
                 }
             }
         }
@@ -261,7 +296,8 @@ final class AppState: ObservableObject {
 
         if let text {
             if text.isEmpty {
-                recordEntry(text, turn: turn, releasedAt: releasedAt)
+                // A failed capture is not a dictation; keep it out of the
+                // history and the day stats.
                 if turn.peak < Self.silenceFloor {
                     fail("No audio reached the app — check your input device")
                 } else {
@@ -289,15 +325,16 @@ final class AppState: ObservableObject {
     }
 
     /// Recover WAVs parked by failed turns from previous runs: transcribe
-    /// them into history (never paste — focus is unpredictable at launch).
+    /// them into history (never paste — focus is unpredictable at launch,
+    /// and lastTranscript stays owned by this session's dictations).
     func recoverPendingAudio() async {
         guard let apiKey = Prefs.shared.resolvedAPIKey() else { return }
         for url in BatchTranscriber.pendingFiles() {
             guard let text = try? await BatchTranscriber.transcribe(
-                fileURL: url, apiKey: apiKey, prompt: Self.batchPrompt()) else { continue }
+                fileURL: url, apiKey: apiKey, prompt: Self.batchPrompt(),
+                language: Prefs.shared.languageList.first) else { continue }
             History.shared.add(text: text, seconds: BatchTranscriber.duration(of: url))
             try? FileManager.default.removeItem(at: url)
-            lastTranscript = text
         }
     }
 
@@ -316,29 +353,30 @@ final class AppState: ObservableObject {
     // MARK: - Delivery & phase
 
     private func deliver(_ text: String) {
-        let payload = Prefs.shared.trailingSpace ? text + " " : text
-        if currentTurn != nil {
-            pendingPastes.append(payload)
-        } else {
-            flushPendingPastes()
-            if Paster.insertText(payload) {
-                if Prefs.shared.playSounds && Prefs.shared.endSound {
-                    Sfx.landed?.play()
-                }
-            } else {
-                fail("Secure input is active — the transcript is on your clipboard, press ⌘V")
-            }
-        }
+        pendingPastes.append(Prefs.shared.trailingSpace ? text + " " : text)
+        flushPendingPastes()
+    }
+
+    /// True when the hotkey's modifier is physically down right now.
+    /// A synthesized ⌘V posted then would reach the app as ⌥⌘V.
+    private var hotkeyPhysicallyDown: Bool {
+        let flag = Prefs.shared.hotkey.cgEventFlag
+        guard flag != [] else { return false }
+        return CGEventSource.flagsState(.combinedSessionState).contains(flag)
     }
 
     private func flushPendingPastes() {
-        var blocked = false
-        for payload in pendingPastes where !Paster.insertText(payload) {
-            blocked = true
-        }
+        guard !pendingPastes.isEmpty, currentTurn == nil, !hotkeyPhysicallyDown else { return }
+        // One combined paste: N rapid-fire synthesized ⌘Vs race slow targets
+        // into pasting the last payload twice and losing the first.
+        let combined = pendingPastes.joined()
         pendingPastes.removeAll()
-        if blocked {
-            fail("Secure input is active — a transcript is on your clipboard, press ⌘V")
+        if Paster.insertText(combined) {
+            if Prefs.shared.playSounds && Prefs.shared.endSound {
+                Sfx.landed?.play()
+            }
+        } else {
+            fail("Secure input is active — the transcript is on your clipboard, press ⌘V")
         }
     }
 

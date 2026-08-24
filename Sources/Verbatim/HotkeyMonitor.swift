@@ -14,8 +14,11 @@ final class HotkeyMonitor {
     private var selectedKey: ModifierKey = .none
     private var isPressed = false
 
-    var onKeyDown: (() -> Void)?
-    var onKeyUp: (() -> Void)?
+    /// Callbacks receive the hardware event time (seconds of uptime), so
+    /// press durations are measured from when the key moved, not from when a
+    /// possibly-congested main thread got around to noticing.
+    var onKeyDown: ((TimeInterval) -> Void)?
+    var onKeyUp: ((TimeInterval) -> Void)?
     /// ⌘ + the hotkey (when the hotkey itself isn't a Command key).
     var onRepaste: (() -> Void)?
 
@@ -64,9 +67,17 @@ final class HotkeyMonitor {
             if let source = runLoopSource {
                 CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
             }
+            CFMachPortInvalidate(tap)
         }
         eventTap = nil
         runLoopSource = nil
+        isPressed = false
+    }
+
+    /// Called after AppState's watchdog synthesizes a release: the press
+    /// state must agree, so a delayed real release event is filtered here
+    /// instead of double-firing, and the next press still registers.
+    func resetPressState() {
         isPressed = false
     }
 
@@ -80,7 +91,10 @@ final class HotkeyMonitor {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         guard keyCode == selectedKey.keyCode else { return }
 
-        let pressed = event.flags.contains(selectedKey.cgEventFlag)
+        // Device-dependent bit, not the semantic mask: the other key of the
+        // same pair (Left vs Right ⌥) must not mask this key's release.
+        let pressed = (event.flags.rawValue & selectedKey.deviceMask) != 0
+        let eventTime = TimeInterval(event.timestamp) / 1_000_000_000
 
         // ⌘ + hotkey = re-paste gesture, not a dictation. The matching
         // release is ignored because isPressed was never set.
@@ -93,10 +107,10 @@ final class HotkeyMonitor {
 
         if pressed && !isPressed {
             isPressed = true
-            DispatchQueue.main.async { self.onKeyDown?() }
+            DispatchQueue.main.async { self.onKeyDown?(eventTime) }
         } else if !pressed && isPressed {
             isPressed = false
-            DispatchQueue.main.async { self.onKeyUp?() }
+            DispatchQueue.main.async { self.onKeyUp?(eventTime) }
         }
     }
 }

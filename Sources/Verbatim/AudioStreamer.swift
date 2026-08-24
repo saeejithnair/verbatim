@@ -9,6 +9,7 @@ final class AudioStreamer {
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
     private var configObserver: NSObjectProtocol?
+    private var stopped = false
 
     /// Converted PCM chunk plus its peak sample amplitude (for dead-mic
     /// detection).
@@ -21,7 +22,11 @@ final class AudioStreamer {
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
-            try? self?.installTap()
+            // removeObserver doesn't cancel an already-enqueued block; a
+            // config change landing at key release must not resurrect the
+            // tap (and the orange mic light) after stop().
+            guard let self, !self.stopped else { return }
+            try? self.installTap()
         }
     }
 
@@ -48,6 +53,7 @@ final class AudioStreamer {
     }
 
     func stop() {
+        stopped = true
         if let configObserver {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil
