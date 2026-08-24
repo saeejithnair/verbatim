@@ -114,6 +114,10 @@ struct MainView: View {
 
             Divider()
 
+            StatsView()
+
+            Divider()
+
             HistoryView()
         }
     }
