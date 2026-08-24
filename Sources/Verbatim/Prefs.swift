@@ -30,6 +30,8 @@ final class Prefs: ObservableObject {
     @Published var endSound: Bool { didSet { defaults.set(endSound, forKey: "endSound") } }
     @Published var trailingSpace: Bool { didSet { defaults.set(trailingSpace, forKey: "trailingSpace") } }
     @Published var languages: String { didSet { defaults.set(languages, forKey: "languages") } }
+    /// Input device name; empty = system default.
+    @Published var inputDevice: String { didSet { defaults.set(inputDevice, forKey: "inputDevice") } }
 
     private init() {
         apiKey = defaults.string(forKey: "apiKey") ?? ""
@@ -41,6 +43,7 @@ final class Prefs: ObservableObject {
         endSound = defaults.object(forKey: "endSound") as? Bool ?? true
         trailingSpace = defaults.object(forKey: "trailingSpace") as? Bool ?? true
         languages = defaults.string(forKey: "languages") ?? ""
+        inputDevice = defaults.string(forKey: "inputDevice") ?? ""
     }
 
     /// The Settings field wins; falls back to the process environment, then to

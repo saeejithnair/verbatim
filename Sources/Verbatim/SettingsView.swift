@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject private var prefs = Prefs.shared
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var microphones: [String] = []
 
     var body: some View {
         Form {
@@ -38,6 +39,20 @@ struct SettingsView: View {
                     AppShared.state.hotkeyActive = HotkeyMonitor.shared.start(modifierKey: newKey)
                 }
                 caption("Hold to dictate. Double-tap to latch hands-free, tap again to finish. ⌘ + the key pastes the last transcript again.")
+
+                Picker("Microphone", selection: $prefs.inputDevice) {
+                    Text("System Default").tag("")
+                    ForEach(microphones, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                .onAppear {
+                    microphones = AudioDevices.inputDevices().map(\.name)
+                    if !prefs.inputDevice.isEmpty && !microphones.contains(prefs.inputDevice) {
+                        microphones.append(prefs.inputDevice)
+                    }
+                }
+                caption("The built-in mic starts instantly and often beats Bluetooth for dictation — Bluetooth mics wake for 1–2 s and drop to phone-call quality. Output stays on your AirPods either way.")
 
                 Picker("Latency", selection: $prefs.delay) {
                     ForEach(TranscriptionDelay.allCases) { delay in

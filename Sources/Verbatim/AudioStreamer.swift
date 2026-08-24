@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 
 /// Taps the default input device and emits 24 kHz mono PCM16 chunks, the
@@ -33,6 +34,17 @@ final class AudioStreamer {
     private func installTap() throws {
         engine.inputNode.removeTap(onBus: 0)
         let input = engine.inputNode
+
+        // Pin the chosen input device (falls back to system default if it's
+        // gone). Must happen before the format is read.
+        let pinnedName = Prefs.shared.inputDevice
+        if !pinnedName.isEmpty,
+           var deviceID = AudioDevices.device(named: pinnedName),
+           let audioUnit = input.audioUnit {
+            AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_CurrentDevice,
+                                 kAudioUnitScope_Global, 0, &deviceID,
+                                 UInt32(MemoryLayout<AudioDeviceID>.size))
+        }
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0,
               let converter = AVAudioConverter(from: inFormat, to: Self.apiFormat) else {
