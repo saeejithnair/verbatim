@@ -90,9 +90,23 @@ Settings:
   (release → paste) so you can tune this on data.
 - **Keywords** — a token field of names and jargon you actually say. These are
   sent with every request and stop technical terms from being mangled.
+- **Languages** — ISO codes (`en`, or `en, fr`); empty auto-detects. Locking a
+  language stops mid-sentence drift into other scripts, via both the API's
+  language constraint and a generated prompt clause.
+- **Microphone** — pin an input device. The built-in mic starts instantly;
+  Bluetooth mics (AirPods) take 1–2 s to wake into headset mode, and words
+  spoken before the wake never reach the Mac. Pinning the built-in mic keeps
+  output on your headphones while dictation starts immediately.
 - **Prompt** — the transcription instruction. The default demands strict
   verbatim output; make it yours (one click resets it).
+- **Sounds** — the start and paste cues are individually mutable. (On idle
+  Bluetooth headphones cues can arrive seconds late — the *output* link also
+  sleeps — so silencing them is honest, not reckless: capture doesn't wait
+  for the sound.)
 - **Launch at login** — so the hotkey is always live.
+
+If a finalize ever times out, the transcript still pastes but its history
+card is marked **partial** — suspect output is never passed off as complete.
 
 ## Test without a mic
 
