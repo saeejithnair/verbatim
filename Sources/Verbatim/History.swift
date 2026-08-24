@@ -17,7 +17,7 @@ final class History: ObservableObject {
 
     /// gpt-live-transcribe list price. Costs shown are estimates derived
     /// from streamed audio duration.
-    static let pricePerMinute = 0.017
+    nonisolated static let pricePerMinute = 0.017
 
     @Published private(set) var entries: [HistoryEntry] = []
 
