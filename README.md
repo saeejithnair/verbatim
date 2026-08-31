@@ -27,7 +27,8 @@ invisible while you talk.
 
 - **Bring your own OpenAI API key.** No subscription, no accounts, no servers
   of ours. `gpt-live-transcribe` costs about **$0.017 per minute of audio** —
-  roughly $2 a month for 20 minutes of dictation a day.
+  roughly $10 a month for 20 minutes of dictation a day, and you only pay for
+  what you use.
 - **Everything stays on your Mac.** History and stats are local JSON files.
   Audio is streamed for transcription and never stored anywhere.
 - The main window shows your dictation history (with per-turn duration, cost,
