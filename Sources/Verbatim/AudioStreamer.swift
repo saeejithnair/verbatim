@@ -8,8 +8,8 @@ final class AudioStreamer {
         commonFormat: .pcmFormatInt16, sampleRate: 24000, channels: 1, interleaved: true)!
 
     private let engine = AVAudioEngine()
-    private var converter: AVAudioConverter?
     private var configObserver: NSObjectProtocol?
+    private var pendingReinstall: DispatchWorkItem?
     private var stopped = false
 
     /// Converted PCM chunk plus its peak sample amplitude (for dead-mic
@@ -27,8 +27,29 @@ final class AudioStreamer {
             // config change landing at key release must not resurrect the
             // tap (and the orange mic light) after stop().
             guard let self, !self.stopped else { return }
-            try? self.installTap()
+            // Route switches (AirPlay/TV connect, AirPods) arrive as a BURST
+            // of notifications, and mid-burst the input format is transiently
+            // invalid — installing a tap right then is an uncatchable
+            // NSException (the meetup-demo crash). Coalesce the burst and
+            // reinstall once, after the route settles.
+            self.scheduleReinstall()
         }
+    }
+
+    private func scheduleReinstall() {
+        pendingReinstall?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.stopped else { return }
+            do {
+                try self.installTap()
+            } catch {
+                // Input still unusable; the next notification in the burst
+                // (or the user switching devices back) retries.
+                NSLog("Verbatim: tap reinstall failed: %@", error.localizedDescription)
+            }
+        }
+        pendingReinstall = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     private func installTap() throws {
@@ -61,15 +82,28 @@ final class AudioStreamer {
             }
         }
         let inFormat = input.outputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0,
+        // sampleRate alone is not enough: mid-route-change the node can
+        // report a valid rate with ZERO channels, and AVFoundation answers
+        // installTap with an uncatchable NSException.
+        guard inFormat.sampleRate > 0, inFormat.channelCount > 0,
               let converter = AVAudioConverter(from: inFormat, to: Self.apiFormat) else {
             throw VerbatimError.audioSetup("no usable input device")
         }
-        self.converter = converter
 
-        input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buffer, _ in
-            guard let self,
-                  let chunk = Self.convert(buffer, with: converter, to: Self.apiFormat),
+        // format: nil — tap in whatever the node's CURRENT format is. An
+        // explicit format can go stale between reading it and installing the
+        // tap (route-change burst), which is exactly the crash. The converter
+        // is block-local and rebuilt if the buffer format drifts mid-take.
+        var blockConverter = converter
+        input.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
+            guard let self else { return }
+            if blockConverter.inputFormat != buffer.format {
+                guard let fresh = AVAudioConverter(from: buffer.format, to: Self.apiFormat) else {
+                    return
+                }
+                blockConverter = fresh
+            }
+            guard let chunk = Self.convert(buffer, with: blockConverter, to: Self.apiFormat),
                   !chunk.data.isEmpty else { return }
             self.onChunk?(chunk.data, chunk.peak)
         }
@@ -81,13 +115,14 @@ final class AudioStreamer {
 
     func stop() {
         stopped = true
+        pendingReinstall?.cancel()
+        pendingReinstall = nil
         if let configObserver {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil
         }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        converter = nil
     }
 
     static func convert(_ buffer: AVAudioPCMBuffer,
