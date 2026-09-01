@@ -1,15 +1,23 @@
 import AudioToolbox
 import AVFoundation
+import ObjCTry
 
 /// Taps the default input device and emits 24 kHz mono PCM16 chunks, the
 /// format the Realtime transcription API expects.
+///
+/// Route changes (AirPlay/TV connect, AirPods, device switches) are the
+/// hazard here: the engine stops itself and AVFoundation raises uncatchable
+/// NSExceptions if a tap is installed while the input format is transiently
+/// invalid — that crashed a live demo. Every exception-capable AVFoundation
+/// call goes through the ObjCTry shim, so the worst case is a thrown Swift
+/// error and a retry, never a crash.
 final class AudioStreamer {
     static let apiFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16, sampleRate: 24000, channels: 1, interleaved: true)!
 
     private let engine = AVAudioEngine()
     private var configObserver: NSObjectProtocol?
-    private var pendingReinstall: DispatchWorkItem?
+    private var pendingRetry: DispatchWorkItem?
     private var stopped = false
 
     /// Converted PCM chunk plus its peak sample amplitude (for dead-mic
@@ -27,29 +35,29 @@ final class AudioStreamer {
             // config change landing at key release must not resurrect the
             // tap (and the orange mic light) after stop().
             guard let self, !self.stopped else { return }
-            // Route switches (AirPlay/TV connect, AirPods) arrive as a BURST
-            // of notifications, and mid-burst the input format is transiently
-            // invalid — installing a tap right then is an uncatchable
-            // NSException (the meetup-demo crash). Coalesce the burst and
-            // reinstall once, after the route settles.
-            self.scheduleReinstall()
+            self.attemptReinstall()
         }
     }
 
-    private func scheduleReinstall() {
-        pendingReinstall?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.stopped else { return }
-            do {
-                try self.installTap()
-            } catch {
-                // Input still unusable; the next notification in the burst
-                // (or the user switching devices back) retries.
-                NSLog("Verbatim: tap reinstall failed: %@", error.localizedDescription)
-            }
+    /// Reinstall immediately — the engine stopped itself on the config
+    /// change, so every millisecond before the tap is back is lost speech.
+    /// NSExceptions are converted to Swift errors by the ObjC shim, so a
+    /// mid-burst attempt against an invalid format fails softly and retries.
+    private func attemptReinstall() {
+        pendingRetry?.cancel()
+        pendingRetry = nil
+        guard !stopped else { return }
+        do {
+            try installTap()
+        } catch {
+            NSLog("Verbatim: tap reinstall failed (%@) — retrying in 250 ms",
+                  error.localizedDescription)
+            let work = DispatchWorkItem { [weak self] in self?.attemptReinstall() }
+            pendingRetry = work
+            // Self-rearming until it succeeds or the turn stops — a failure
+            // on the burst's last notification must not strand a dead mic.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
-        pendingReinstall = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     private func installTap() throws {
@@ -83,22 +91,26 @@ final class AudioStreamer {
         }
         let inFormat = input.outputFormat(forBus: 0)
         // sampleRate alone is not enough: mid-route-change the node can
-        // report a valid rate with ZERO channels, and AVFoundation answers
-        // installTap with an uncatchable NSException.
+        // report a valid rate with ZERO channels.
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0,
               let converter = AVAudioConverter(from: inFormat, to: Self.apiFormat) else {
             throw VerbatimError.audioSetup("no usable input device")
         }
 
-        // format: nil — tap in whatever the node's CURRENT format is. An
-        // explicit format can go stale between reading it and installing the
-        // tap (route-change burst), which is exactly the crash. The converter
-        // is block-local and rebuilt if the buffer format drifts mid-take.
+        // format: nil — tap in whatever the node's CURRENT format is, so a
+        // format that went stale between reading it and installing can't be
+        // handed to AVFoundation. The converter is block-local and rebuilt
+        // if the buffer format drifts mid-take (route change while talking).
         var blockConverter = converter
-        input.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
+        var loggedRebuildFailure = false
+        let tapBlock: (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, _ in
             guard let self else { return }
             if blockConverter.inputFormat != buffer.format {
                 guard let fresh = AVAudioConverter(from: buffer.format, to: Self.apiFormat) else {
+                    if !loggedRebuildFailure {
+                        loggedRebuildFailure = true
+                        NSLog("Verbatim: no converter for drifted format %@", buffer.format)
+                    }
                     return
                 }
                 blockConverter = fresh
@@ -107,22 +119,49 @@ final class AudioStreamer {
                   !chunk.data.isEmpty else { return }
             self.onChunk?(chunk.data, chunk.peak)
         }
-        engine.prepare()
+
+        // The guard above is a snapshot; the HAL can invalidate the format
+        // between it and this call, and installTap answers that with an
+        // NSException. The shim turns it into a throw (→ retry), not a crash.
+        if let exception = VBTryCatch({
+            input.installTap(onBus: 0, bufferSize: 2048, format: nil, block: tapBlock)
+            self.engine.prepare()
+        }) {
+            throw VerbatimError.audioSetup(
+                "tap rejected: \(exception.reason ?? exception.name.rawValue)")
+        }
+
         if !engine.isRunning {
-            try engine.start()
+            var startError: Error?
+            if let exception = VBTryCatch({
+                do { try self.engine.start() } catch { startError = error }
+            }) {
+                throw VerbatimError.audioSetup(
+                    "engine start rejected: \(exception.reason ?? exception.name.rawValue)")
+            }
+            if let startError { throw startError }
         }
     }
 
     func stop() {
         stopped = true
-        pendingReinstall?.cancel()
-        pendingReinstall = nil
+        pendingRetry?.cancel()
+        pendingRetry = nil
         if let configObserver {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil
         }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+    }
+
+    deinit {
+        // Backstop for any future path that drops a streamer without stop():
+        // the observer registration and armed retry must not outlive us.
+        if let configObserver {
+            NotificationCenter.default.removeObserver(configObserver)
+        }
+        pendingRetry?.cancel()
     }
 
     static func convert(_ buffer: AVAudioPCMBuffer,
