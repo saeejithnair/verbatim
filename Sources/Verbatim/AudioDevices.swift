@@ -26,12 +26,11 @@ enum AudioDevices {
         }
     }
 
-    static func device(named target: String) -> AudioDeviceID? {
-        inputDevices().first { $0.name == target }?.id
-    }
-
-    static func deviceName(_ id: AudioDeviceID) -> String? {
-        name(of: id)
+    /// The persistent UID an AudioQueue pins to, for the input device with
+    /// this name.
+    static func uid(named target: String) -> String? {
+        guard let id = inputDevices().first(where: { $0.name == target })?.id else { return nil }
+        return string(kAudioDevicePropertyDeviceUID, of: id)
     }
 
     private static func hasInput(_ id: AudioDeviceID) -> Bool {
@@ -45,8 +44,13 @@ enum AudioDevices {
     }
 
     private static func name(of id: AudioDeviceID) -> String? {
+        string(kAudioObjectPropertyName, of: id)
+    }
+
+    private static func string(_ selector: AudioObjectPropertySelector,
+                               of id: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var value: Unmanaged<CFString>?

@@ -177,7 +177,7 @@ final class AppState: ObservableObject {
             }
         }
 
-        // The connect is ~300 ms of network; the engine start blocks the main
+        // The connect is ~300 ms of network; the capture start blocks the main
         // thread. Kick the network off first so they overlap.
         turn.transcriber.connect()
         do {
@@ -246,7 +246,7 @@ final class AppState: ObservableObject {
             // Capture the human tail — the syllable still leaving the mouth
             // as the finger lifts — before closing the stream.
             try? await Task.sleep(for: .milliseconds(120))
-            // Commit goes on the wire before the blocking engine teardown.
+            // Commit goes on the wire before the blocking capture teardown.
             turn.transcriber.commitAudio()
             turn.streamer.stop()
             await finalize(turn, releasedAt: releasedAt)

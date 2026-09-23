@@ -1,167 +1,91 @@
 import AudioToolbox
 import AVFoundation
-import ObjCTry
 
-/// Taps the default input device and emits 24 kHz mono PCM16 chunks, the
-/// format the Realtime transcription API expects.
+/// Captures the input device as 24 kHz mono PCM16 chunks, the format the
+/// Realtime transcription API expects.
 ///
-/// Route changes (AirPlay/TV connect, AirPods, device switches) are the
-/// hazard here: the engine stops itself and AVFoundation raises uncatchable
-/// NSExceptions if a tap is installed while the input format is transiently
-/// invalid — that crashed a live demo. Every exception-capable AVFoundation
-/// call goes through the ObjCTry shim, so the worst case is a thrown Swift
-/// error and a retry, never a crash.
+/// An input-only AudioQueue, not AVAudioEngine: the engine runs input and
+/// output through one duplex unit, so its input is bound to the OUTPUT
+/// device — an AirPlay TV at 44.1 kHz against a 48 kHz mic fails to start
+/// (-10868), and every output route change tears the tap down mid-take. The
+/// queue never touches output, and it resamples to the API format itself.
 final class AudioStreamer {
     static let apiFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16, sampleRate: 24000, channels: 1, interleaved: true)!
 
-    private let engine = AVAudioEngine()
-    private var configObserver: NSObjectProtocol?
-    private var pendingRetry: DispatchWorkItem?
-    private var stopped = false
+    /// ~43 ms per chunk, three in flight.
+    private static let bufferBytes: UInt32 = 2048
+    private static let bufferCount = 3
+
+    private var queue: AudioQueueRef?
 
     /// Converted PCM chunk plus its peak sample amplitude (for dead-mic
-    /// detection).
+    /// detection). Called on a private serial queue.
     var onChunk: ((Data, Int16) -> Void)?
 
     func start() throws {
-        try installTap()
-        // AirPods connecting, default-device switches, etc. reconfigure the
-        // engine underneath the tap; reinstall so the stream survives.
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            // removeObserver doesn't cancel an already-enqueued block; a
-            // config change landing at key release must not resurrect the
-            // tap (and the orange mic light) after stop().
-            guard let self, !self.stopped else { return }
-            self.attemptReinstall()
-        }
-    }
-
-    /// Reinstall immediately — the engine stopped itself on the config
-    /// change, so every millisecond before the tap is back is lost speech.
-    /// NSExceptions are converted to Swift errors by the ObjC shim, so a
-    /// mid-burst attempt against an invalid format fails softly and retries.
-    private func attemptReinstall() {
-        pendingRetry?.cancel()
-        pendingRetry = nil
-        guard !stopped else { return }
-        do {
-            try installTap()
-        } catch {
-            NSLog("Verbatim: tap reinstall failed (%@) — retrying in 250 ms",
-                  error.localizedDescription)
-            let work = DispatchWorkItem { [weak self] in self?.attemptReinstall() }
-            pendingRetry = work
-            // Self-rearming until it succeeds or the turn stops — a failure
-            // on the burst's last notification must not strand a dead mic.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
-        }
-    }
-
-    private func installTap() throws {
-        engine.inputNode.removeTap(onBus: 0)
-        let input = engine.inputNode
-
-        // Pin the chosen input device (falls back to system default if it's
-        // gone). Must happen before the format is read.
-        let pinnedName = Prefs.shared.inputDevice
-        if !pinnedName.isEmpty {
-            if var deviceID = AudioDevices.device(named: pinnedName),
-               let audioUnit = input.audioUnit {
-                let status = AudioUnitSetProperty(
-                    audioUnit, kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global, 0, &deviceID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size))
-                NSLog("Verbatim: pin '%@' status %d", pinnedName, status)
-            } else {
-                NSLog("Verbatim: pin '%@' failed — device or audio unit missing", pinnedName)
-            }
-        }
-        // Read back which device the input is actually using.
-        if let audioUnit = input.audioUnit {
-            var actualID = AudioDeviceID(0)
-            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-            if AudioUnitGetProperty(audioUnit, kAudioOutputUnitProperty_CurrentDevice,
-                                    kAudioUnitScope_Global, 0, &actualID, &size) == noErr {
-                NSLog("Verbatim: capturing from '%@'",
-                      AudioDevices.deviceName(actualID) ?? "device \(actualID)")
-            }
-        }
-        let inFormat = input.outputFormat(forBus: 0)
-        // sampleRate alone is not enough: mid-route-change the node can
-        // report a valid rate with ZERO channels.
-        guard inFormat.sampleRate > 0, inFormat.channelCount > 0,
-              let converter = AVAudioConverter(from: inFormat, to: Self.apiFormat) else {
-            throw VerbatimError.audioSetup("no usable input device")
-        }
-
-        // format: nil — tap in whatever the node's CURRENT format is, so a
-        // format that went stale between reading it and installing can't be
-        // handed to AVFoundation. The converter is block-local and rebuilt
-        // if the buffer format drifts mid-take (route change while talking).
-        var blockConverter = converter
-        var loggedRebuildFailure = false
-        let tapBlock: (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, _ in
-            guard let self else { return }
-            if blockConverter.inputFormat != buffer.format {
-                guard let fresh = AVAudioConverter(from: buffer.format, to: Self.apiFormat) else {
-                    if !loggedRebuildFailure {
-                        loggedRebuildFailure = true
-                        NSLog("Verbatim: no converter for drifted format %@", buffer.format)
-                    }
-                    return
+        var format = Self.apiFormat.streamDescription.pointee
+        var newQueue: AudioQueueRef?
+        try check(AudioQueueNewInputWithDispatchQueue(
+            &newQueue, &format, 0, DispatchQueue(label: "ai.papiers.Verbatim.capture")
+        ) { [weak self] queue, buffer, _, _, _ in
+            let bytes = Int(buffer.pointee.mAudioDataByteSize)
+            if bytes > 0, let self {
+                let samples = buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self)
+                var peak: Int16 = 0
+                for i in 0..<bytes / MemoryLayout<Int16>.size {
+                    let magnitude = Int16(clamping: abs(Int(samples[i])))
+                    if magnitude > peak { peak = magnitude }
                 }
-                blockConverter = fresh
+                self.onChunk?(Data(bytes: samples, count: bytes), peak)
             }
-            guard let chunk = Self.convert(buffer, with: blockConverter, to: Self.apiFormat),
-                  !chunk.data.isEmpty else { return }
-            self.onChunk?(chunk.data, chunk.peak)
-        }
+            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        }, "create queue")
+        guard let newQueue else { throw VerbatimError.audioSetup("no queue") }
+        queue = newQueue
 
-        // The guard above is a snapshot; the HAL can invalidate the format
-        // between it and this call, and installTap answers that with an
-        // NSException. The shim turns it into a throw (→ retry), not a crash.
-        if let exception = VBTryCatch({
-            input.installTap(onBus: 0, bufferSize: 2048, format: nil, block: tapBlock)
-            self.engine.prepare()
-        }) {
-            throw VerbatimError.audioSetup(
-                "tap rejected: \(exception.reason ?? exception.name.rawValue)")
-        }
-
-        if !engine.isRunning {
-            var startError: Error?
-            if let exception = VBTryCatch({
-                do { try self.engine.start() } catch { startError = error }
-            }) {
-                throw VerbatimError.audioSetup(
-                    "engine start rejected: \(exception.reason ?? exception.name.rawValue)")
+        do {
+            // Pin the chosen input device; if it's gone, the queue records
+            // from the system default.
+            let pinnedName = Prefs.shared.inputDevice
+            if !pinnedName.isEmpty {
+                if let uid = AudioDevices.uid(named: pinnedName) {
+                    var device = uid as CFString
+                    try check(AudioQueueSetProperty(
+                        newQueue, kAudioQueueProperty_CurrentDevice, &device,
+                        UInt32(MemoryLayout<CFString>.size)), "pin '\(pinnedName)'")
+                    NSLog("Verbatim: capturing from '%@'", pinnedName)
+                } else {
+                    NSLog("Verbatim: '%@' missing — capturing from system default", pinnedName)
+                }
             }
-            if let startError { throw startError }
+            for _ in 0..<Self.bufferCount {
+                var buffer: AudioQueueBufferRef?
+                try check(AudioQueueAllocateBuffer(newQueue, Self.bufferBytes, &buffer), "allocate")
+                AudioQueueEnqueueBuffer(newQueue, buffer!, 0, nil)
+            }
+            try check(AudioQueueStart(newQueue, nil), "start")
+        } catch {
+            stop()
+            throw error
         }
     }
 
     func stop() {
-        stopped = true
-        pendingRetry?.cancel()
-        pendingRetry = nil
-        if let configObserver {
-            NotificationCenter.default.removeObserver(configObserver)
-            self.configObserver = nil
-        }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        guard let queue else { return }
+        self.queue = nil
+        AudioQueueStop(queue, true)
+        AudioQueueDispose(queue, true)
     }
 
     deinit {
-        // Backstop for any future path that drops a streamer without stop():
-        // the observer registration and armed retry must not outlive us.
-        if let configObserver {
-            NotificationCenter.default.removeObserver(configObserver)
+        stop()
+    }
+
+    private func check(_ status: OSStatus, _ step: String) throws {
+        guard status == noErr else {
+            throw VerbatimError.audioSetup("\(step) failed (OSStatus \(status))")
         }
-        pendingRetry?.cancel()
     }
 
     static func convert(_ buffer: AVAudioPCMBuffer,
